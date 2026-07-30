@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Campus Navigation</title>
+  <link href="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.css" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="map"></div>
+
+  <!-- NEW: full-screen overlay shown until all campus data has loaded -->
+  <div id="loading-overlay">
+    <div id="loading-box">
+      <p>Loading campus data...</p>
+    </div>
+  </div>
+
+  <div id="panel">
+    <div id="mode-toggle">
+      <button id="walk-btn" class="mode-btn active">Walking</button>
+      <button id="drive-btn" class="mode-btn">Driving</button>
+    </div>
+
+    <label for="origin-select">From</label>
+    <select id="origin-select" disabled>
+      <option value="">-- Select a building --</option>
+    </select>
+
+    <button id="locate-btn" disabled>📍 Use My Location as Start</button>
+
+    <label for="dest-select">To</label>
+    <select id="dest-select" disabled>
+      <option value="">-- Select a building --</option>
+    </select>
+
+    <p id="status">Loading campus data, please wait...</p>
+    <p id="route-summary"></p>
+    <ol id="route-steps"></ol>
+
+    <div id="layer-toggles">
+      <p class="toggle-heading">Show on map</p>
+      <label class="toggle-row"><input type="checkbox" id="toggle-buildings" checked> Buildings</label>
+      <label class="toggle-row"><input type="checkbox" id="toggle-paths" checked> Footpaths</label>
+      <label class="toggle-row"><input type="checkbox" id="toggle-roads" checked> Roads</label>
+      <label class="toggle-row"><input type="checkbox" id="toggle-landmarks" checked> Landmarks</label>
+    </div>
+
+    <!-- NEW: color legend -->
+    <div id="legend">
+      <p class="toggle-heading">Legend</p>
+      <div class="legend-row"><span class="legend-swatch" style="background:#8899aa;"></span> Building</div>
+      <div class="legend-row"><span class="legend-swatch legend-line" style="background:#ffcc00;"></span> Footpath</div>
+      <div class="legend-row"><span class="legend-swatch legend-line" style="background:#e63946;"></span> Road</div>
+      <div class="legend-row"><span class="legend-swatch legend-dot" style="background:#9b59b6;"></span> Landmark</div>
+      <div class="legend-row"><span class="legend-swatch legend-line" style="background:#00c853;"></span> Route</div>
+    </div>
+
+    <button id="reset-btn">Reset</button>
+  </div>
+
+  <script src="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js"></script>
+  <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

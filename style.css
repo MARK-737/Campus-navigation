@@ -1,0 +1,192 @@
+body { margin: 0; padding: 0; }
+#map { position: absolute; top: 0; bottom: 0; width: 100%; }
+
+/* NEW: full-screen loading overlay */
+#loading-overlay {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(255, 255, 255, 0.9);
+  z-index: 10;               /* higher than #panel's z-index, so it covers everything */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: sans-serif;
+}
+
+#loading-box {
+  background: white;
+  padding: 20px 30px;
+  border-radius: 8px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+  font-size: 15px;
+  color: #333;
+}
+
+/* NEW: class JS adds once loading is finished, to hide the overlay */
+#loading-overlay.hidden {
+  display: none;
+}
+
+#panel {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 1;
+  background: white;
+  padding: 12px 16px;
+  border-radius: 8px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+  font-family: sans-serif;
+  max-width: 260px;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+#mode-toggle { display: flex; gap: 6px; margin-bottom: 8px; }
+
+.mode-btn {
+  flex: 1;
+  padding: 6px;
+  border: 1px solid #ccc;
+  background: #f0f0f0;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.mode-btn.active {
+  background: #2a72d4;
+  color: white;
+  border-color: #2a72d4;
+}
+
+#panel label {
+  display: block;
+  font-size: 12px;
+  font-weight: bold;
+  margin-top: 8px;
+  color: #444;
+}
+
+#panel select {
+  width: 100%;
+  padding: 6px;
+  margin-top: 3px;
+  border-radius: 4px;
+  border: 1px solid #ccc;
+  font-size: 13px;
+}
+
+/* NEW: visual feedback for disabled controls, so it's obvious
+   they're not usable yet while data is loading */
+#panel select:disabled,
+#panel button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+#locate-btn {
+  width: 100%;
+  padding: 7px;
+  margin-top: 8px;
+  border: 1px solid #2a72d4;
+  background: white;
+  color: #2a72d4;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+#locate-btn:hover { background: #eaf1fb; }
+
+#status { font-size: 14px; margin: 8px 0; }
+
+#route-summary {
+  font-size: 15px;
+  font-weight: bold;
+  margin: 8px 0 4px 0;
+  color: #1a1a1a;
+}
+
+#route-steps {
+  font-size: 13px;
+  padding-left: 20px;
+  margin: 4px 0 12px 0;
+}
+
+#route-steps li { margin-bottom: 4px; }
+
+#layer-toggles {
+  border-top: 1px solid #e0e0e0;
+  margin-top: 10px;
+  padding-top: 8px;
+}
+
+.toggle-heading {
+  font-size: 12px;
+  font-weight: bold;
+  color: #444;
+  margin: 0 0 6px 0;
+}
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: normal;
+  margin-top: 4px;
+  cursor: pointer;
+}
+
+/* NEW: legend styling */
+#legend {
+  border-top: 1px solid #e0e0e0;
+  margin-top: 10px;
+  padding-top: 8px;
+}
+
+.legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  margin-top: 4px;
+  color: #333;
+}
+
+.legend-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;   /* default: small square, used for Buildings */
+}
+
+.legend-swatch.legend-line {
+  height: 4px;          /* thin bar, used for Footpath/Road/Route */
+  border-radius: 2px;
+}
+
+.legend-swatch.legend-dot {
+  border-radius: 50%;   /* full circle, used for Landmark */
+}
+
+#reset-btn {
+  width: 100%;
+  padding: 6px;
+  cursor: pointer;
+  margin-top: 6px;
+}
+
+@media (max-width: 600px) {
+  #panel {
+    top: auto;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    max-width: none;
+    width: 100%;
+    border-radius: 16px 16px 0 0;
+    max-height: 55vh;
+    box-shadow: 0 -2px 10px rgba(0,0,0,0.3);
+  }
+}
