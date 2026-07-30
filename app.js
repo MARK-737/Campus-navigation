@@ -27,6 +27,11 @@ let watchId = null;
 
 let followMode = false;
 
+// NEW: voice navigation state
+let navigationActive = false;
+let currentRoute = [];
+let turnPoints = [];
+
 let dataReady = {
   buildings: false,
   network: false
@@ -202,6 +207,8 @@ function showLoadError(message) {
 }
 
 
+// ── LIVE LOCATION TRACKING ───────────────────────────────────────────
+
 function startLiveLocation() {
   if (!navigator.geolocation) {
     updateStatus('Location is not supported on this browser.');
@@ -224,6 +231,12 @@ function startLiveLocation() {
       if (followMode) {
         map.easeTo({ center: liveCoord, duration: 800 });
       }
+
+      // NEW: while actively navigating, check progress against turn
+      // points and speak guidance as the user approaches each one.
+      if (navigationActive) {
+        checkNavigationProgress(liveCoord);
+      }
     },
     (error) => {
       updateStatus('Could not get your location. Check permissions and try again.');
@@ -231,6 +244,94 @@ function startLiveLocation() {
     },
     { enableHighAccuracy: true, timeout: 10000 }
   );
+}
+
+
+// ── NEW: VOICE ASSISTANT ─────────────────────────────────────────────
+
+// Speaks a short phrase aloud using the browser's built-in speech engine.
+// No external service or API key needed — this is a native Web Speech API
+// feature supported by all modern mobile and desktop browsers.
+function speak(text) {
+  if (!window.speechSynthesis) return; // silently do nothing on unsupported browsers
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.rate = 1.0;
+  window.speechSynthesis.speak(utterance);
+}
+
+// Scans the route for genuine turns, filtering out small digitization
+// wobbles using a two-part rule:
+//   1) the direction change must exceed 45 degrees ("very sharp")
+//   2) the route must continue in that NEW direction for at least 10
+//      meters before the next sharp turn (or the destination) —
+//      otherwise it's discarded as noise, not a real turn.
+function computeTurnPoints(routeCoords, angleThreshold = 45, minSegmentMeters = 10) {
+  const rawTurns = [];
+
+  for (let i = 1; i < routeCoords.length - 1; i++) {
+    const bearingIn = turf.bearing(routeCoords[i - 1], routeCoords[i]);
+    const bearingOut = turf.bearing(routeCoords[i], routeCoords[i + 1]);
+
+    let turnAngle = bearingOut - bearingIn;
+    if (turnAngle > 180) turnAngle -= 360;
+    if (turnAngle < -180) turnAngle += 360;
+
+    if (Math.abs(turnAngle) > angleThreshold) {
+      rawTurns.push({
+        index: i,
+        coord: routeCoords[i],
+        direction: turnAngle > 0 ? 'right' : 'left'
+      });
+    }
+  }
+
+  const filtered = [];
+  for (let k = 0; k < rawTurns.length; k++) {
+    const thisTurn = rawTurns[k];
+    const nextIndex = (k + 1 < rawTurns.length) ? rawTurns[k + 1].index : routeCoords.length - 1;
+
+    let segLen = 0;
+    for (let j = thisTurn.index; j < nextIndex; j++) {
+      segLen += turf.distance(routeCoords[j], routeCoords[j + 1], { units: 'meters' });
+    }
+
+    if (segLen >= minSegmentMeters) {
+      filtered.push({ ...thisTurn, announcedUpcoming: false, announcedNow: false });
+    }
+    // if segLen is under the threshold, this "turn" is skipped entirely —
+    // treated as the route continuing straight through a minor bend.
+  }
+
+  return filtered;
+}
+
+// Called on every live location update while navigation is active.
+// Checks distance to the destination and to the next un-announced turn,
+// and speaks guidance at two ranges: "in N meters, turn X" when
+// approaching, and "turn X now" when right at the point.
+function checkNavigationProgress(liveCoord) {
+  if (!destCoord) return;
+
+  const distToDest = turf.distance(liveCoord, destCoord, { units: 'meters' });
+  if (distToDest < 8) {
+    speak('You have arrived at your destination.');
+    navigationActive = false;
+    return;
+  }
+
+  const nextTurn = turnPoints.find(t => !t.announcedNow);
+  if (!nextTurn) return; // no more turns left to announce on this route
+
+  const distToTurn = turf.distance(liveCoord, nextTurn.coord, { units: 'meters' });
+
+  if (distToTurn <= 5 && !nextTurn.announcedNow) {
+    speak(`Turn ${nextTurn.direction} now, then continue straight.`);
+    nextTurn.announcedNow = true;
+  } else if (distToTurn <= 20 && !nextTurn.announcedUpcoming) {
+    const roundedDist = Math.round(distToTurn / 5) * 5;
+    speak(`In ${roundedDist} meters, turn ${nextTurn.direction}.`);
+    nextTurn.announcedUpcoming = true;
+  }
 }
 
 
@@ -302,25 +403,21 @@ document.getElementById('search-btn').addEventListener('click', () => {
   updateStatus('Calculating route...');
   calculateAndDrawRoute();
 
-  // CHANGED: search panel -> nav panel toggle, explicit per your request
   document.getElementById('search-panel').classList.add('hidden');
-  document.getElementById('nav-panel').classList.remove('hidden');
 });
 
 
 // ── NAV PANEL BUTTONS ────────────────────────────────────────────────
 
 document.getElementById('start-nav-btn').addEventListener('click', () => {
-  if (!originCoord) {
-    updateStatus('Waiting for your location...');
+  if (!originCoord || currentRoute.length === 0) {
+    updateStatus('Waiting for your location and route...');
     return;
   }
 
   followMode = true;
+  navigationActive = true;
 
-  // FIX: stop any in-progress camera animation (e.g., the route-fitting
-  // animation from calculateAndDrawRoute) before starting a new one —
-  // this is what was causing the "needs 2-3 clicks" issue on long routes.
   map.stop();
 
   const north = turf.destination(originCoord, 0.02, 0, { units: 'kilometers' });
@@ -333,21 +430,34 @@ document.getElementById('start-nav-btn').addEventListener('click', () => {
   map.fitBounds(closeBbox, { pitch: 60, duration: 1000 });
 
   updateStatus('Navigating — follow the blue line.');
+
+  // NEW: voice kickoff — announces start, and whether the first stretch
+  // is straight or has a turn coming up soon.
+  if (turnPoints.length > 0) {
+    speak('Navigation started. Continue straight.');
+  } else {
+    speak('Navigation started. Head straight to your destination.');
+  }
 });
 
 document.getElementById('recenter-btn').addEventListener('click', () => {
   if (!originCoord) return;
   followMode = true;
-  map.stop(); // same fix applied here, for consistency
+  map.stop();
   map.easeTo({ center: originCoord, duration: 800 });
 });
 
-// CHANGED: "Search again" now explicitly toggles nav panel off and
-// search panel back on, per your request.
 document.getElementById('search-again-btn').addEventListener('click', () => {
   followMode = false;
-  document.getElementById('nav-panel').classList.add('hidden');
+  navigationActive = false;
+  currentRoute = [];
+  turnPoints = [];
+
   document.getElementById('search-panel').classList.remove('hidden');
+  document.getElementById('start-nav-btn').disabled = true;
+  document.getElementById('recenter-btn').disabled = true;
+  document.getElementById('route-summary').textContent = 'Search a destination to see distance and ETA.';
+
   destInput.value = '';
   destCoord = null;
   clearRoute();
@@ -363,7 +473,6 @@ function updateStatus(message) {
 
 function clearRoute() {
   map.getSource('route-line-source').setData({ type: 'FeatureCollection', features: [] });
-  document.getElementById('route-summary').textContent = '';
 }
 
 
@@ -385,13 +494,20 @@ function calculateAndDrawRoute() {
   drawRoute(route);
   fitMapToRoute(route);
 
+  // NEW: store the route and compute its filtered turn points for the
+  // voice assistant to use during navigation.
+  currentRoute = route;
+  turnPoints = computeTurnPoints(route);
+
   const totalMeters = calculateTotalDistance(route);
   const speed = currentMode === 'walk' ? WALK_SPEED_MPS : DRIVE_SPEED_MPS;
   const minutes = Math.max(1, Math.round(totalMeters / speed / 60));
 
-  // CHANGED: only distance + ETA shown now — turn-by-turn instructions removed.
   document.getElementById('route-summary').textContent =
     `${Math.round(totalMeters)}m • approx. ${minutes} min ${currentMode === 'walk' ? 'walk' : 'drive'}`;
+
+  document.getElementById('start-nav-btn').disabled = false;
+  document.getElementById('recenter-btn').disabled = false;
 
   updateStatus('Route ready. Tap Start Navigation when you\'re ready to go.');
 }
@@ -431,7 +547,7 @@ function drawRoute(routeCoords) {
 }
 
 function fitMapToRoute(routeCoords) {
-  map.stop(); // FIX: same stop-before-animate fix applied here too
+  map.stop();
   const routeLine = turf.lineString(routeCoords);
   const bbox = turf.bbox(routeLine);
 
@@ -545,27 +661,6 @@ function findShortestPath(graph, startCoord, endCoord) {
 
   return path.map(n => n.split(',').map(Number));
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 

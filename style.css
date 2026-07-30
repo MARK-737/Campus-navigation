@@ -40,7 +40,6 @@ body { margin: 0; padding: 0; }
   text-align: center;
 }
 
-/* CHANGED: search panel enlarged — wider, more padding, larger text */
 #search-panel {
   position: absolute;
   top: 65px;
@@ -127,12 +126,14 @@ body { margin: 0; padding: 0; }
 
 #search-btn:disabled { background: #a9c3e8; cursor: not-allowed; }
 
-/* CHANGED: nav panel enlarged too */
+/* NAV PANEL — always visible now, z-index high enough to stay above the
+   map regardless of zoom level (zoom never affects HTML layering anyway,
+   but this keeps it explicit and safe) */
 #nav-panel {
   position: absolute;
   bottom: 10px;
   right: 10px;
-  z-index: 2;
+  z-index: 6;
   background: white;
   padding: 18px 22px;
   border-radius: 10px;
@@ -140,8 +141,6 @@ body { margin: 0; padding: 0; }
   font-family: sans-serif;
   width: 320px;
 }
-
-#nav-panel.hidden { display: none; }
 
 #route-summary {
   font-size: 18px;
@@ -163,11 +162,35 @@ body { margin: 0; padding: 0; }
   background: #f0f0f0;
 }
 
+/* CHANGED: "Start Navigation" now visually dominant — larger, bold,
+   gradient fill, glowing shadow, and a subtle pulse animation to draw
+   the eye as the primary action in the panel. */
 #start-nav-btn {
-  background: #2a72d4;
+  background: linear-gradient(135deg, #1e88e5, #1565c0);
   color: white;
-  border-color: #2a72d4;
+  border: none;
+  font-size: 16px;
+  font-weight: bold;
+  padding: 14px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  box-shadow: 0 0 0 rgba(30, 136, 229, 0.5);
+  animation: pulse-glow 2s infinite;
 }
+
+#start-nav-btn:disabled {
+  background: #b0c4de;
+  animation: none;
+  box-shadow: none;
+}
+
+@keyframes pulse-glow {
+  0%   { box-shadow: 0 0 0 0 rgba(30, 136, 229, 0.5); }
+  70%  { box-shadow: 0 0 0 10px rgba(30, 136, 229, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(30, 136, 229, 0); }
+}
+
+#recenter-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 @media (max-width: 600px) {
   #search-panel {
