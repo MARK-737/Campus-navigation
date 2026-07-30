@@ -32,9 +32,6 @@ let buildingList = [];
 let userMarker = null;
 let watchId = null;
 
-// NEW: tracks whether each required dataset has finished loading
-// successfully, so we know exactly when it's safe to hide the
-// loading overlay and enable the controls.
 let dataReady = {
   buildings: false,
   network: false
@@ -59,6 +56,9 @@ map.on('load', () => {
     }
   });
 
+  // CHANGED: footpaths now grey instead of yellow, per request —
+  // roads and paths should read as neutral background infrastructure,
+  // with the calculated ROUTE being the only thing that stands out.
   map.addSource('campus-paths', {
     type: 'geojson',
     data: 'data/data/data/Foot_path.geojson'
@@ -69,11 +69,14 @@ map.on('load', () => {
     type: 'line',
     source: 'campus-paths',
     paint: {
-      'line-color': '#ffcc00',
+      'line-color': '#9e9e9e',
       'line-width': 3
     }
   });
 
+  // CHANGED: roads now grey too — same color as footpaths, distinguished
+  // only by being slightly thicker, matching how the physical roads are
+  // usually a bit wider than paths.
   map.addSource('campus-roads', {
     type: 'geojson',
     data: 'data/data/data/Roads.geojson'
@@ -84,7 +87,7 @@ map.on('load', () => {
     type: 'line',
     source: 'campus-roads',
     paint: {
-      'line-color': '#e63946',
+      'line-color': '#9e9e9e',
       'line-width': 4
     }
   });
@@ -106,6 +109,7 @@ map.on('load', () => {
     }
   });
 
+  // CHANGED: route line color switched from green to blue, per request.
   map.addSource('route-line-source', {
     type: 'geojson',
     data: { type: 'FeatureCollection', features: [] }
@@ -116,9 +120,9 @@ map.on('load', () => {
     type: 'line',
     source: 'route-line-source',
     paint: {
-      'line-color': '#00c853',
+      'line-color': '#1565c0',
       'line-width': 6,
-      'line-opacity': 0.9
+      'line-opacity': 0.95
     }
   });
 
@@ -137,9 +141,9 @@ map.on('load', () => {
     map.getCanvas().style.cursor = '';
   });
 
-  // NEW: Buildings fetch now has a .catch() — if this file fails to
-  // load (wrong path, server error, missing file after deployment),
-  // the user sees a clear message instead of a silent broken app.
+  // NOTE: we still fetch Buildings.geojson here, since the destination
+  // dropdown ("To") still needs building names/centroids — only the
+  // ORIGIN dropdown was removed, not building name lookup itself.
   fetch('data/data/data/Buildings.geojson')
     .then(res => {
       if (!res.ok) throw new Error(`Server responded with ${res.status}`);
@@ -148,7 +152,6 @@ map.on('load', () => {
     .then(data => {
       buildingList = extractNamedLocations(data, 'Building');
       buildingList.sort((a, b) => a.name.localeCompare(b.name));
-      populateDropdown('origin-select', buildingList);
       populateDropdown('dest-select', buildingList);
 
       dataReady.buildings = true;
@@ -159,7 +162,6 @@ map.on('load', () => {
       showLoadError('Could not load building data. Please refresh, or check your connection.');
     });
 
-  // NEW: same error-handling pattern applied to the routing network fetch.
   fetch('data/data/data/CampusNetwork.geojson')
     .then(res => {
       if (!res.ok) throw new Error(`Server responded with ${res.status}`);
@@ -183,9 +185,6 @@ map.on('load', () => {
     });
 
   map.on('click', 'buildings-3d', (e) => {
-    // NEW: ignore clicks entirely until data has finished loading,
-    // since originCoord/destCoord being set early would let a user
-    // trigger a route calculation against an empty graph.
     if (!dataReady.buildings || !dataReady.network) return;
 
     const clickedCoord = [e.lngLat.lng, e.lngLat.lat];
@@ -205,45 +204,29 @@ map.on('load', () => {
     }
   });
 
-
-  const layerToggleMap = {
-    'toggle-buildings': 'buildings-3d',
-    'toggle-paths': 'paths-line',
-    'toggle-roads': 'roads-line',
-    'toggle-landmarks': 'landmarks-point'
-  };
-
-  Object.keys(layerToggleMap).forEach(checkboxId => {
-    document.getElementById(checkboxId).addEventListener('change', (e) => {
-      const layerId = layerToggleMap[checkboxId];
-      map.setLayoutProperty(layerId, 'visibility', e.target.checked ? 'visible' : 'none');
-    });
-  });
+  // REMOVED: layerToggleMap and its checkbox event listeners — the
+  // "Show on map" section no longer exists in the HTML.
 
 });
 
 
-// ── NEW: LOADING STATE MANAGEMENT ───────────────────────────────────
+// ── LOADING STATE MANAGEMENT ─────────────────────────────────────────
 
-// Called after EITHER dataset finishes loading. Only actually hides
-// the overlay and enables controls once BOTH are ready.
 function checkAllDataReady() {
   if (dataReady.buildings && dataReady.network) {
     document.getElementById('loading-overlay').classList.add('hidden');
-    document.getElementById('origin-select').disabled = false;
     document.getElementById('dest-select').disabled = false;
     document.getElementById('locate-btn').disabled = false;
-    updateStatus('Click a building, choose From/To, or use your location.');
+    updateStatus('Use your location, or choose a destination below.');
   }
 }
 
-// Shows a clear, permanent error message in place of the loading
-// spinner, if a required file fails to load. Controls stay disabled,
-// since the app genuinely cannot function without this data.
 function showLoadError(message) {
   document.getElementById('loading-box').innerHTML = `<p style="color:#c0392b;">${message}</p>`;
 }
 
+
+// ── LIVE LOCATION TRACKING ───────────────────────────────────────────
 
 document.getElementById('locate-btn').addEventListener('click', () => {
   if (!navigator.geolocation) {
@@ -266,7 +249,7 @@ document.getElementById('locate-btn').addEventListener('click', () => {
         userMarker = new mapboxgl.Marker({ color: '#2a72d4' })
           .setLngLat(liveCoord)
           .addTo(map);
-        updateStatus('Location found! Now choose or click a destination.');
+        updateStatus('Location found! Now choose a destination.');
         map.flyTo({ center: liveCoord, zoom: 18 });
         checkAndCalculate();
       } else {
@@ -312,11 +295,7 @@ function populateDropdown(selectId, locations) {
   });
 }
 
-document.getElementById('origin-select').addEventListener('change', (e) => {
-  if (e.target.value === '') return;
-  originCoord = buildingList[e.target.value].coord;
-  checkAndCalculate();
-});
+// REMOVED: origin-select change listener — that dropdown no longer exists.
 
 document.getElementById('dest-select').addEventListener('change', (e) => {
   if (e.target.value === '') return;
@@ -329,7 +308,7 @@ function checkAndCalculate() {
     updateStatus('Calculating route...');
     calculateAndDrawRoute();
   } else if (originCoord) {
-    updateStatus('Origin set. Now choose or click a destination.');
+    updateStatus('Origin set. Now choose a destination.');
   }
 }
 
@@ -360,9 +339,8 @@ document.getElementById('reset-btn').addEventListener('click', () => {
   originCoord = null;
   destCoord = null;
   clearRoute();
-  document.getElementById('origin-select').value = '';
   document.getElementById('dest-select').value = '';
-  updateStatus('Click a building, choose From/To, or use your location.');
+  updateStatus('Use your location, or choose a destination below.');
 
   if (watchId !== null) {
     navigator.geolocation.clearWatch(watchId);
@@ -585,39 +563,3 @@ function findShortestPath(graph, startCoord, endCoord) {
 
   return path.map(n => n.split(',').map(Number));
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

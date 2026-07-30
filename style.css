@@ -1,12 +1,11 @@
 body { margin: 0; padding: 0; }
 #map { position: absolute; top: 0; bottom: 0; width: 100%; }
 
-/* NEW: full-screen loading overlay */
 #loading-overlay {
   position: absolute;
   top: 0; left: 0; right: 0; bottom: 0;
   background: rgba(255, 255, 255, 0.9);
-  z-index: 10;               /* higher than #panel's z-index, so it covers everything */
+  z-index: 10;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -22,7 +21,6 @@ body { margin: 0; padding: 0; }
   color: #333;
 }
 
-/* NEW: class JS adds once loading is finished, to hide the overlay */
 #loading-overlay.hidden {
   display: none;
 }
@@ -76,8 +74,6 @@ body { margin: 0; padding: 0; }
   font-size: 13px;
 }
 
-/* NEW: visual feedback for disabled controls, so it's obvious
-   they're not usable yet while data is loading */
 #panel select:disabled,
 #panel button:disabled {
   opacity: 0.5;
@@ -114,61 +110,6 @@ body { margin: 0; padding: 0; }
 }
 
 #route-steps li { margin-bottom: 4px; }
-
-#layer-toggles {
-  border-top: 1px solid #e0e0e0;
-  margin-top: 10px;
-  padding-top: 8px;
-}
-
-.toggle-heading {
-  font-size: 12px;
-  font-weight: bold;
-  color: #444;
-  margin: 0 0 6px 0;
-}
-
-.toggle-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  font-weight: normal;
-  margin-top: 4px;
-  cursor: pointer;
-}
-
-/* NEW: legend styling */
-#legend {
-  border-top: 1px solid #e0e0e0;
-  margin-top: 10px;
-  padding-top: 8px;
-}
-
-.legend-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  margin-top: 4px;
-  color: #333;
-}
-
-.legend-swatch {
-  display: inline-block;
-  width: 14px;
-  height: 14px;
-  border-radius: 3px;   /* default: small square, used for Buildings */
-}
-
-.legend-swatch.legend-line {
-  height: 4px;          /* thin bar, used for Footpath/Road/Route */
-  border-radius: 2px;
-}
-
-.legend-swatch.legend-dot {
-  border-radius: 50%;   /* full circle, used for Landmark */
-}
 
 #reset-btn {
   width: 100%;
