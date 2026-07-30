@@ -25,9 +25,6 @@ let buildingList = [];
 let userMarker = null;
 let watchId = null;
 
-// NEW: tracks whether the camera should keep re-centering on the user's
-// live position. Turned on by "Start Navigation" / "Recenter", turned
-// off automatically the moment the user manually drags or zooms.
 let followMode = false;
 
 let dataReady = {
@@ -141,8 +138,6 @@ map.on('load', () => {
       buildingList = extractNamedLocations(data);
       buildingList.sort((a, b) => a.name.localeCompare(b.name));
 
-      // NEW: show the entire campus on first load, using the real
-      // extent of the buildings data rather than a guessed zoom level.
       const campusBbox = turf.bbox(data);
       map.fitBounds(campusBbox, { padding: 40, pitch: 60, duration: 0 });
 
@@ -176,9 +171,6 @@ map.on('load', () => {
       showLoadError('Could not load routing data. Please refresh, or check your connection.');
     });
 
-  // NEW: clicking a building now sets it as the DESTINATION directly
-  // (origin comes from live GPS now, not from clicks), as a fallback
-  // to typing in the search panel.
   map.on('click', 'buildings-3d', (e) => {
     if (!dataReady.buildings || !dataReady.network) return;
     destCoord = [e.lngLat.lng, e.lngLat.lat];
@@ -186,21 +178,15 @@ map.on('load', () => {
     document.getElementById('suggestions').innerHTML = '';
   });
 
-  // NEW: request geolocation permission immediately on load, instead
-  // of waiting for a button click.
   startLiveLocation();
 
-  // NEW: detect genuine user-driven map interaction (as opposed to our
-  // own programmatic camera moves) to pause follow mode.
   map.on('dragstart', () => { followMode = false; });
   map.on('zoomstart', (e) => {
-    if (e.originalEvent) followMode = false; // only real user zoom gestures have this
+    if (e.originalEvent) followMode = false;
   });
 
 });
 
-
-// ── LOADING STATE MANAGEMENT ─────────────────────────────────────────
 
 function checkAllDataReady() {
   if (dataReady.buildings && dataReady.network) {
@@ -215,8 +201,6 @@ function showLoadError(message) {
   document.getElementById('loading-box').innerHTML = `<p style="color:#c0392b;">${message}</p>`;
 }
 
-
-// ── LIVE LOCATION TRACKING ───────────────────────────────────────────
 
 function startLiveLocation() {
   if (!navigator.geolocation) {
@@ -237,9 +221,6 @@ function startLiveLocation() {
         userMarker.setLngLat(liveCoord);
       }
 
-      // If we're in follow mode (navigation actively started), keep
-      // recentering the camera on the user WITHOUT changing zoom —
-      // this is what lets a user-chosen zoom-out persist across updates.
       if (followMode) {
         map.easeTo({ center: liveCoord, duration: 800 });
       }
@@ -252,8 +233,6 @@ function startLiveLocation() {
   );
 }
 
-
-// ── SEARCH PANEL: AUTOCOMPLETE + DESTINATION SELECTION ──────────────
 
 function extractNamedLocations(geojson) {
   const results = [];
@@ -279,12 +258,10 @@ destInput.addEventListener('input', () => {
   suggestionsBox.innerHTML = '';
 
   if (query.length === 0) {
-    destCoord = null; // clear any prior selection once the user starts typing fresh
+    destCoord = null;
     return;
   }
 
-  // Show up to 6 matches whose name contains the typed text anywhere,
-  // not just at the start — more forgiving for partial/misremembered names.
   const matches = buildingList.filter(b => b.name.toLowerCase().includes(query)).slice(0, 6);
 
   matches.forEach(match => {
@@ -294,7 +271,7 @@ destInput.addEventListener('input', () => {
     item.addEventListener('click', () => {
       destInput.value = match.name;
       destCoord = match.coord;
-      suggestionsBox.innerHTML = ''; // close the suggestion list once picked
+      suggestionsBox.innerHTML = '';
     });
     suggestionsBox.appendChild(item);
   });
@@ -325,7 +302,7 @@ document.getElementById('search-btn').addEventListener('click', () => {
   updateStatus('Calculating route...');
   calculateAndDrawRoute();
 
-  // Switch panels: hide search, show nav.
+  // CHANGED: search panel -> nav panel toggle, explicit per your request
   document.getElementById('search-panel').classList.add('hidden');
   document.getElementById('nav-panel').classList.remove('hidden');
 });
@@ -341,10 +318,11 @@ document.getElementById('start-nav-btn').addEventListener('click', () => {
 
   followMode = true;
 
-  // Build a ~20-meter-wide view around the user's current position by
-  // projecting four points 20m out in each cardinal direction with Turf,
-  // then fitting the camera to that box — precise, rather than a guessed
-  // zoom number.
+  // FIX: stop any in-progress camera animation (e.g., the route-fitting
+  // animation from calculateAndDrawRoute) before starting a new one —
+  // this is what was causing the "needs 2-3 clicks" issue on long routes.
+  map.stop();
+
   const north = turf.destination(originCoord, 0.02, 0, { units: 'kilometers' });
   const south = turf.destination(originCoord, 0.02, 180, { units: 'kilometers' });
   const east = turf.destination(originCoord, 0.02, 90, { units: 'kilometers' });
@@ -360,9 +338,12 @@ document.getElementById('start-nav-btn').addEventListener('click', () => {
 document.getElementById('recenter-btn').addEventListener('click', () => {
   if (!originCoord) return;
   followMode = true;
-  map.easeTo({ center: originCoord, duration: 800 }); // keeps current zoom, per the "unless the user zooms out" requirement
+  map.stop(); // same fix applied here, for consistency
+  map.easeTo({ center: originCoord, duration: 800 });
 });
 
+// CHANGED: "Search again" now explicitly toggles nav panel off and
+// search panel back on, per your request.
 document.getElementById('search-again-btn').addEventListener('click', () => {
   followMode = false;
   document.getElementById('nav-panel').classList.add('hidden');
@@ -370,16 +351,6 @@ document.getElementById('search-again-btn').addEventListener('click', () => {
   destInput.value = '';
   destCoord = null;
   clearRoute();
-  updateStatus('Search for a destination to begin.');
-});
-
-document.getElementById('reset-btn').addEventListener('click', () => {
-  followMode = false;
-  destCoord = null;
-  clearRoute();
-  destInput.value = '';
-  document.getElementById('nav-panel').classList.add('hidden');
-  document.getElementById('search-panel').classList.remove('hidden');
   updateStatus('Search for a destination to begin.');
 });
 
@@ -393,7 +364,6 @@ function updateStatus(message) {
 function clearRoute() {
   map.getSource('route-line-source').setData({ type: 'FeatureCollection', features: [] });
   document.getElementById('route-summary').textContent = '';
-  document.getElementById('route-steps').innerHTML = '';
 }
 
 
@@ -419,17 +389,9 @@ function calculateAndDrawRoute() {
   const speed = currentMode === 'walk' ? WALK_SPEED_MPS : DRIVE_SPEED_MPS;
   const minutes = Math.max(1, Math.round(totalMeters / speed / 60));
 
+  // CHANGED: only distance + ETA shown now — turn-by-turn instructions removed.
   document.getElementById('route-summary').textContent =
     `${Math.round(totalMeters)}m • approx. ${minutes} min ${currentMode === 'walk' ? 'walk' : 'drive'}`;
-
-  const steps = generateInstructions(route);
-  const stepsList = document.getElementById('route-steps');
-  stepsList.innerHTML = '';
-  steps.forEach(stepText => {
-    const li = document.createElement('li');
-    li.textContent = stepText;
-    stepsList.appendChild(li);
-  });
 
   updateStatus('Route ready. Tap Start Navigation when you\'re ready to go.');
 }
@@ -469,6 +431,7 @@ function drawRoute(routeCoords) {
 }
 
 function fitMapToRoute(routeCoords) {
+  map.stop(); // FIX: same stop-before-animate fix applied here too
   const routeLine = turf.lineString(routeCoords);
   const bbox = turf.bbox(routeLine);
 
@@ -486,33 +449,6 @@ function calculateTotalDistance(routeCoords) {
     total += turf.distance(routeCoords[i], routeCoords[i + 1], { units: 'meters' });
   }
   return total;
-}
-
-function generateInstructions(routeCoords) {
-  const instructions = [];
-  let segmentDist = 0;
-
-  for (let i = 0; i < routeCoords.length - 1; i++) {
-    segmentDist += turf.distance(routeCoords[i], routeCoords[i + 1], { units: 'meters' });
-
-    if (i < routeCoords.length - 2) {
-      const bearingIn = turf.bearing(routeCoords[i], routeCoords[i + 1]);
-      const bearingOut = turf.bearing(routeCoords[i + 1], routeCoords[i + 2]);
-
-      let turnAngle = bearingOut - bearingIn;
-      if (turnAngle > 180) turnAngle -= 360;
-      if (turnAngle < -180) turnAngle += 360;
-
-      if (Math.abs(turnAngle) > 25) {
-        const direction = turnAngle > 0 ? 'right' : 'left';
-        instructions.push(`Continue for ${Math.round(segmentDist)}m, then turn ${direction}`);
-        segmentDist = 0;
-      }
-    }
-  }
-
-  instructions.push(`Continue for ${Math.round(segmentDist)}m to arrive at your destination`);
-  return instructions;
 }
 
 
@@ -609,3 +545,45 @@ function findShortestPath(graph, startCoord, endCoord) {
 
   return path.map(n => n.split(',').map(Number));
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

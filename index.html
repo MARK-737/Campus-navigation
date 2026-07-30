@@ -15,10 +15,8 @@
     </div>
   </div>
 
-  <!-- Small floating status message, always visible regardless of which panel is open -->
   <div id="status-bar"><p id="status">Loading campus data, please wait...</p></div>
 
-  <!-- SEARCH PANEL: visible by default. User picks travel mode and destination here. -->
   <div id="search-panel">
     <div id="mode-toggle">
       <button id="walk-btn" class="mode-btn active">Walking</button>
@@ -32,15 +30,13 @@
     <button id="search-btn" disabled>Search</button>
   </div>
 
-  <!-- NAV PANEL: hidden by default, bottom-right. Appears once a search completes. -->
+  <!-- CHANGED: route-steps (turn-by-turn) removed — only summary (distance/ETA) remains -->
   <div id="nav-panel">
     <p id="route-summary"></p>
-    <ol id="route-steps"></ol>
     <div id="nav-buttons">
       <button id="start-nav-btn">Start Navigation</button>
       <button id="recenter-btn">Recenter</button>
       <button id="search-again-btn">Search</button>
-      <button id="reset-btn">Reset</button>
     </div>
   </div>
 
