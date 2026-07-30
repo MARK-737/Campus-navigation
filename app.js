@@ -4,18 +4,11 @@ mapboxgl.accessToken = 'pk.eyJ1IjoibWFyay10ZWUiLCJhIjoiY21zN2l3cHk2MDRjazM5cGxpc
 const map = new mapboxgl.Map({
   container: 'map',
   style: 'mapbox://styles/mapbox/standard',
-  center: [3.82550, 7.24072], // ⚠️ MANUAL INPUT NEEDED: your real campus coordinates
-  zoom: 17,
+  center: [3.82550, 7.24072], // ⚠️ MANUAL INPUT NEEDED: your real campus coordinates (used only briefly, before the campus-wide view takes over)
+  zoom: 16,
   pitch: 60,
   bearing: -20
 });
-
-const geolocateControl = new mapboxgl.GeolocateControl({
-  positionOptions: { enableHighAccuracy: true },
-  trackUserLocation: true,
-  showUserHeading: true
-});
-map.addControl(geolocateControl);
 
 let walkGraph = {};
 let driveGraph = {};
@@ -31,6 +24,11 @@ let buildingList = [];
 
 let userMarker = null;
 let watchId = null;
+
+// NEW: tracks whether the camera should keep re-centering on the user's
+// live position. Turned on by "Start Navigation" / "Recenter", turned
+// off automatically the moment the user manually drags or zooms.
+let followMode = false;
 
 let dataReady = {
   buildings: false,
@@ -56,9 +54,6 @@ map.on('load', () => {
     }
   });
 
-  // CHANGED: footpaths now grey instead of yellow, per request —
-  // roads and paths should read as neutral background infrastructure,
-  // with the calculated ROUTE being the only thing that stands out.
   map.addSource('campus-paths', {
     type: 'geojson',
     data: 'data/data/data/Foot_path.geojson'
@@ -74,9 +69,6 @@ map.on('load', () => {
     }
   });
 
-  // CHANGED: roads now grey too — same color as footpaths, distinguished
-  // only by being slightly thicker, matching how the physical roads are
-  // usually a bit wider than paths.
   map.addSource('campus-roads', {
     type: 'geojson',
     data: 'data/data/data/Roads.geojson'
@@ -109,7 +101,6 @@ map.on('load', () => {
     }
   });
 
-  // CHANGED: route line color switched from green to blue, per request.
   map.addSource('route-line-source', {
     type: 'geojson',
     data: { type: 'FeatureCollection', features: [] }
@@ -141,18 +132,19 @@ map.on('load', () => {
     map.getCanvas().style.cursor = '';
   });
 
-  // NOTE: we still fetch Buildings.geojson here, since the destination
-  // dropdown ("To") still needs building names/centroids — only the
-  // ORIGIN dropdown was removed, not building name lookup itself.
   fetch('data/data/data/Buildings.geojson')
     .then(res => {
       if (!res.ok) throw new Error(`Server responded with ${res.status}`);
       return res.json();
     })
     .then(data => {
-      buildingList = extractNamedLocations(data, 'Building');
+      buildingList = extractNamedLocations(data);
       buildingList.sort((a, b) => a.name.localeCompare(b.name));
-      populateDropdown('dest-select', buildingList);
+
+      // NEW: show the entire campus on first load, using the real
+      // extent of the buildings data rather than a guessed zoom level.
+      const campusBbox = turf.bbox(data);
+      map.fitBounds(campusBbox, { padding: 40, pitch: 60, duration: 0 });
 
       dataReady.buildings = true;
       checkAllDataReady();
@@ -184,28 +176,26 @@ map.on('load', () => {
       showLoadError('Could not load routing data. Please refresh, or check your connection.');
     });
 
+  // NEW: clicking a building now sets it as the DESTINATION directly
+  // (origin comes from live GPS now, not from clicks), as a fallback
+  // to typing in the search panel.
   map.on('click', 'buildings-3d', (e) => {
     if (!dataReady.buildings || !dataReady.network) return;
-
-    const clickedCoord = [e.lngLat.lng, e.lngLat.lat];
-
-    if (!originCoord) {
-      originCoord = clickedCoord;
-      updateStatus('Origin set. Now click your destination.');
-    } else if (!destCoord) {
-      destCoord = clickedCoord;
-      updateStatus('Calculating route...');
-      calculateAndDrawRoute();
-    } else {
-      originCoord = clickedCoord;
-      destCoord = null;
-      clearRoute();
-      updateStatus('Origin set. Now click your destination.');
-    }
+    destCoord = [e.lngLat.lng, e.lngLat.lat];
+    document.getElementById('dest-input').value = 'Selected on map';
+    document.getElementById('suggestions').innerHTML = '';
   });
 
-  // REMOVED: layerToggleMap and its checkbox event listeners — the
-  // "Show on map" section no longer exists in the HTML.
+  // NEW: request geolocation permission immediately on load, instead
+  // of waiting for a button click.
+  startLiveLocation();
+
+  // NEW: detect genuine user-driven map interaction (as opposed to our
+  // own programmatic camera moves) to pause follow mode.
+  map.on('dragstart', () => { followMode = false; });
+  map.on('zoomstart', (e) => {
+    if (e.originalEvent) followMode = false; // only real user zoom gestures have this
+  });
 
 });
 
@@ -215,9 +205,9 @@ map.on('load', () => {
 function checkAllDataReady() {
   if (dataReady.buildings && dataReady.network) {
     document.getElementById('loading-overlay').classList.add('hidden');
-    document.getElementById('dest-select').disabled = false;
-    document.getElementById('locate-btn').disabled = false;
-    updateStatus('Use your location, or choose a destination below.');
+    document.getElementById('dest-input').disabled = false;
+    document.getElementById('search-btn').disabled = false;
+    updateStatus('Search for a destination to begin.');
   }
 }
 
@@ -228,17 +218,11 @@ function showLoadError(message) {
 
 // ── LIVE LOCATION TRACKING ───────────────────────────────────────────
 
-document.getElementById('locate-btn').addEventListener('click', () => {
+function startLiveLocation() {
   if (!navigator.geolocation) {
     updateStatus('Location is not supported on this browser.');
     return;
   }
-
-  if (watchId !== null) {
-    navigator.geolocation.clearWatch(watchId);
-  }
-
-  updateStatus('Getting your location...');
 
   watchId = navigator.geolocation.watchPosition(
     (position) => {
@@ -249,14 +233,15 @@ document.getElementById('locate-btn').addEventListener('click', () => {
         userMarker = new mapboxgl.Marker({ color: '#2a72d4' })
           .setLngLat(liveCoord)
           .addTo(map);
-        updateStatus('Location found! Now choose a destination.');
-        map.flyTo({ center: liveCoord, zoom: 18 });
-        checkAndCalculate();
       } else {
         userMarker.setLngLat(liveCoord);
-        if (destCoord) {
-          calculateAndDrawRoute();
-        }
+      }
+
+      // If we're in follow mode (navigation actively started), keep
+      // recentering the camera on the user WITHOUT changing zoom —
+      // this is what lets a user-chosen zoom-out persist across updates.
+      if (followMode) {
+        map.easeTo({ center: liveCoord, duration: 800 });
       }
     },
     (error) => {
@@ -265,10 +250,12 @@ document.getElementById('locate-btn').addEventListener('click', () => {
     },
     { enableHighAccuracy: true, timeout: 10000 }
   );
-});
+}
 
 
-function extractNamedLocations(geojson, typeLabel) {
+// ── SEARCH PANEL: AUTOCOMPLETE + DESTINATION SELECTION ──────────────
+
+function extractNamedLocations(geojson) {
   const results = [];
 
   geojson.features.forEach(feature => {
@@ -278,50 +265,40 @@ function extractNamedLocations(geojson, typeLabel) {
     const centroid = turf.centroid(feature);
     const coord = centroid.geometry.coordinates;
 
-    results.push({ name, coord, type: typeLabel });
+    results.push({ name, coord });
   });
 
   return results;
 }
 
-function populateDropdown(selectId, locations) {
-  const select = document.getElementById(selectId);
-  select.innerHTML = '<option value="">-- Select a building --</option>';
-  locations.forEach((location, index) => {
-    const option = document.createElement('option');
-    option.value = index;
-    option.textContent = location.name;
-    select.appendChild(option);
-  });
-}
+const destInput = document.getElementById('dest-input');
+const suggestionsBox = document.getElementById('suggestions');
 
-// REMOVED: origin-select change listener — that dropdown no longer exists.
+destInput.addEventListener('input', () => {
+  const query = destInput.value.trim().toLowerCase();
+  suggestionsBox.innerHTML = '';
 
-document.getElementById('dest-select').addEventListener('change', (e) => {
-  if (e.target.value === '') return;
-  destCoord = buildingList[e.target.value].coord;
-  checkAndCalculate();
-});
-
-function checkAndCalculate() {
-  if (originCoord && destCoord) {
-    updateStatus('Calculating route...');
-    calculateAndDrawRoute();
-  } else if (originCoord) {
-    updateStatus('Origin set. Now choose a destination.');
+  if (query.length === 0) {
+    destCoord = null; // clear any prior selection once the user starts typing fresh
+    return;
   }
-}
 
+  // Show up to 6 matches whose name contains the typed text anywhere,
+  // not just at the start — more forgiving for partial/misremembered names.
+  const matches = buildingList.filter(b => b.name.toLowerCase().includes(query)).slice(0, 6);
 
-function updateStatus(message) {
-  document.getElementById('status').textContent = message;
-}
-
-function clearRoute() {
-  map.getSource('route-line-source').setData({ type: 'FeatureCollection', features: [] });
-  document.getElementById('route-summary').textContent = '';
-  document.getElementById('route-steps').innerHTML = '';
-}
+  matches.forEach(match => {
+    const item = document.createElement('div');
+    item.className = 'suggestion-item';
+    item.textContent = match.name;
+    item.addEventListener('click', () => {
+      destInput.value = match.name;
+      destCoord = match.coord;
+      suggestionsBox.innerHTML = ''; // close the suggestion list once picked
+    });
+    suggestionsBox.appendChild(item);
+  });
+});
 
 document.getElementById('walk-btn').addEventListener('click', () => {
   currentMode = 'walk';
@@ -335,23 +312,92 @@ document.getElementById('drive-btn').addEventListener('click', () => {
   document.getElementById('walk-btn').classList.remove('active');
 });
 
-document.getElementById('reset-btn').addEventListener('click', () => {
-  originCoord = null;
-  destCoord = null;
-  clearRoute();
-  document.getElementById('dest-select').value = '';
-  updateStatus('Use your location, or choose a destination below.');
+document.getElementById('search-btn').addEventListener('click', () => {
+  if (!originCoord) {
+    updateStatus('Still finding your location — please wait a moment and try again.');
+    return;
+  }
+  if (!destCoord) {
+    updateStatus('Please select a destination from the suggestions list.');
+    return;
+  }
 
-  if (watchId !== null) {
-    navigator.geolocation.clearWatch(watchId);
-    watchId = null;
-  }
-  if (userMarker) {
-    userMarker.remove();
-    userMarker = null;
-  }
+  updateStatus('Calculating route...');
+  calculateAndDrawRoute();
+
+  // Switch panels: hide search, show nav.
+  document.getElementById('search-panel').classList.add('hidden');
+  document.getElementById('nav-panel').classList.remove('hidden');
 });
 
+
+// ── NAV PANEL BUTTONS ────────────────────────────────────────────────
+
+document.getElementById('start-nav-btn').addEventListener('click', () => {
+  if (!originCoord) {
+    updateStatus('Waiting for your location...');
+    return;
+  }
+
+  followMode = true;
+
+  // Build a ~20-meter-wide view around the user's current position by
+  // projecting four points 20m out in each cardinal direction with Turf,
+  // then fitting the camera to that box — precise, rather than a guessed
+  // zoom number.
+  const north = turf.destination(originCoord, 0.02, 0, { units: 'kilometers' });
+  const south = turf.destination(originCoord, 0.02, 180, { units: 'kilometers' });
+  const east = turf.destination(originCoord, 0.02, 90, { units: 'kilometers' });
+  const west = turf.destination(originCoord, 0.02, 270, { units: 'kilometers' });
+
+  const closeBbox = turf.bbox(turf.featureCollection([north, south, east, west]));
+
+  map.fitBounds(closeBbox, { pitch: 60, duration: 1000 });
+
+  updateStatus('Navigating — follow the blue line.');
+});
+
+document.getElementById('recenter-btn').addEventListener('click', () => {
+  if (!originCoord) return;
+  followMode = true;
+  map.easeTo({ center: originCoord, duration: 800 }); // keeps current zoom, per the "unless the user zooms out" requirement
+});
+
+document.getElementById('search-again-btn').addEventListener('click', () => {
+  followMode = false;
+  document.getElementById('nav-panel').classList.add('hidden');
+  document.getElementById('search-panel').classList.remove('hidden');
+  destInput.value = '';
+  destCoord = null;
+  clearRoute();
+  updateStatus('Search for a destination to begin.');
+});
+
+document.getElementById('reset-btn').addEventListener('click', () => {
+  followMode = false;
+  destCoord = null;
+  clearRoute();
+  destInput.value = '';
+  document.getElementById('nav-panel').classList.add('hidden');
+  document.getElementById('search-panel').classList.remove('hidden');
+  updateStatus('Search for a destination to begin.');
+});
+
+
+// ── UI HELPER FUNCTIONS ────────────────────────────────────────────
+
+function updateStatus(message) {
+  document.getElementById('status').textContent = message;
+}
+
+function clearRoute() {
+  map.getSource('route-line-source').setData({ type: 'FeatureCollection', features: [] });
+  document.getElementById('route-summary').textContent = '';
+  document.getElementById('route-steps').innerHTML = '';
+}
+
+
+// ── ROUTE CALCULATION AND DRAWING ──────────────────────────────────
 
 function calculateAndDrawRoute() {
   const graph = currentMode === 'walk' ? walkGraph : driveGraph;
@@ -362,7 +408,7 @@ function calculateAndDrawRoute() {
   const route = findShortestPath(graph, nearestStart, nearestEnd);
 
   if (!route) {
-    updateStatus('No route found for this mode. Try Reset or switch mode.');
+    updateStatus('No route found for this mode. Try a different destination or mode.');
     return;
   }
 
@@ -385,7 +431,7 @@ function calculateAndDrawRoute() {
     stepsList.appendChild(li);
   });
 
-  updateStatus('Route found! Click Reset to try another.');
+  updateStatus('Route ready. Tap Start Navigation when you\'re ready to go.');
 }
 
 function findNearestNode(graph, clickCoord) {
@@ -427,7 +473,7 @@ function fitMapToRoute(routeCoords) {
   const bbox = turf.bbox(routeLine);
 
   map.fitBounds(bbox, {
-    padding: { top: 50, bottom: 50, left: 300, right: 50 },
+    padding: { top: 50, bottom: 50, left: 50, right: 280 },
     pitch: 60,
     duration: 1000
   });
