@@ -35,7 +35,6 @@ let turnPoints = [];
 let compassActive = false;
 let lastHeading = null;
 
-// NEW: auto-resume-following timer, active only during navigation
 let followResumeTimer = null;
 const FOLLOW_RESUME_DELAY_MS = 4000;
 
@@ -198,10 +197,6 @@ map.on('load', () => {
 
   startLiveLocation();
 
-  // CHANGED: dragstart/zoomstart still immediately pause following
-  // (so a manual gesture is never fought mid-motion), but now they
-  // also SCHEDULE an automatic resume a few seconds later, instead of
-  // requiring the user to tap Recenter forever.
   map.on('dragstart', () => {
     followMode = false;
     scheduleFollowResume();
@@ -230,15 +225,13 @@ function showLoadError(message) {
 }
 
 
-// NEW: manages the "resume following after a few seconds of no manual
-// interaction" behavior — only active while actively navigating.
 function scheduleFollowResume() {
   if (!navigationActive) return;
 
   clearTimeout(followResumeTimer);
   followResumeTimer = setTimeout(() => {
     followMode = true;
-    lastHeading = null; // avoid a sudden rotation jump from a stale heading
+    lastHeading = null;
     if (originCoord) {
       map.easeTo({ center: originCoord, duration: 800 });
     }
@@ -287,9 +280,6 @@ function startLiveLocation() {
         userMarker.setLngLat(liveCoord);
       }
 
-      // While followMode is on, every GPS update re-centers the camera
-      // on the user — this is what keeps them at the center throughout
-      // navigation by default.
       if (followMode) {
         map.easeTo({ center: liveCoord, duration: 800 });
       }
@@ -531,12 +521,10 @@ document.getElementById('start-nav-btn').addEventListener('click', () => {
 
   map.stop();
 
-  map.easeTo({
-    center: originCoord,
-    zoom: 19,
-    pitch: 60,
-    duration: 1000
-  });
+  // Auto-zoom removed — map stays at its current view. followMode
+  // (handled in startLiveLocation) still keeps the camera centered on
+  // the user's live position, just without forcing a specific zoom
+  // level the moment this button is pressed.
 
   updateStatus('Navigating — follow the blue line.');
 
@@ -551,7 +539,7 @@ document.getElementById('recenter-btn').addEventListener('click', () => {
   if (!originCoord) return;
   followMode = true;
   lastHeading = null;
-  clearTimeout(followResumeTimer); // manual recenter cancels any pending auto-resume
+  clearTimeout(followResumeTimer);
   map.stop();
   map.easeTo({ center: originCoord, duration: 800 });
 });
