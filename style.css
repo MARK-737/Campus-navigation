@@ -40,6 +40,8 @@ body { margin: 0; padding: 0; }
   text-align: center;
 }
 
+/* CHANGED: search panel now extends further right — wider box anchored
+   at the left, instead of a narrow column hugging the corner. */
 #search-panel {
   position: absolute;
   top: 65px;
@@ -50,7 +52,7 @@ body { margin: 0; padding: 0; }
   border-radius: 10px;
   box-shadow: 0 2px 8px rgba(0,0,0,0.3);
   font-family: sans-serif;
-  width: 320px;
+  width: min(460px, calc(100vw - 20px));
 }
 
 #search-panel.hidden { display: none; }
@@ -126,20 +128,21 @@ body { margin: 0; padding: 0; }
 
 #search-btn:disabled { background: #a9c3e8; cursor: not-allowed; }
 
-/* NAV PANEL — always visible now, z-index high enough to stay above the
-   map regardless of zoom level (zoom never affects HTML layering anyway,
-   but this keeps it explicit and safe) */
+/* CHANGED: nav panel moved to bottom-CENTER, on every screen size —
+   no longer right-anchored, and no separate mobile override needed
+   for its position since this layout already works at any width. */
 #nav-panel {
   position: absolute;
   bottom: 10px;
-  right: 10px;
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 6;
   background: white;
   padding: 18px 22px;
   border-radius: 10px;
   box-shadow: 0 2px 8px rgba(0,0,0,0.3);
   font-family: sans-serif;
-  width: 320px;
+  width: min(340px, calc(100vw - 20px));
 }
 
 #route-summary {
@@ -162,9 +165,6 @@ body { margin: 0; padding: 0; }
   background: #f0f0f0;
 }
 
-/* CHANGED: "Start Navigation" now visually dominant — larger, bold,
-   gradient fill, glowing shadow, and a subtle pulse animation to draw
-   the eye as the primary action in the panel. */
 #start-nav-btn {
   background: linear-gradient(135deg, #1e88e5, #1565c0);
   color: white;
@@ -174,7 +174,6 @@ body { margin: 0; padding: 0; }
   padding: 14px;
   letter-spacing: 0.5px;
   text-transform: uppercase;
-  box-shadow: 0 0 0 rgba(30, 136, 229, 0.5);
   animation: pulse-glow 2s infinite;
 }
 
@@ -184,33 +183,59 @@ body { margin: 0; padding: 0; }
   box-shadow: none;
 }
 
+#recenter-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
 @keyframes pulse-glow {
   0%   { box-shadow: 0 0 0 0 rgba(30, 136, 229, 0.5); }
   70%  { box-shadow: 0 0 0 10px rgba(30, 136, 229, 0); }
   100% { box-shadow: 0 0 0 0 rgba(30, 136, 229, 0); }
 }
 
-#recenter-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* NEW: custom pulsating "you are here" marker, replacing the plain
+   default Mapbox pin — same pulse rhythm as the Start Navigation button */
+.user-dot-wrapper {
+  width: 22px;
+  height: 22px;
+  position: relative;
+}
+
+.user-dot-core {
+  width: 16px;
+  height: 16px;
+  background: #2a72d4;
+  border: 3px solid white;
+  border-radius: 50%;
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.4);
+  z-index: 2;
+}
+
+.user-dot-pulse {
+  width: 22px;
+  height: 22px;
+  background: rgba(42, 114, 212, 0.5);
+  border-radius: 50%;
+  position: absolute;
+  top: 0;
+  left: 0;
+  animation: user-pulse 1.8s infinite;
+  z-index: 1;
+}
+
+@keyframes user-pulse {
+  0%   { transform: scale(0.6); opacity: 0.8; }
+  100% { transform: scale(2.4); opacity: 0; }
+}
 
 @media (max-width: 600px) {
   #search-panel {
     top: auto;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    width: 100%;
-    box-sizing: border-box;
-    border-radius: 16px 16px 0 0;
-    max-height: 60vh;
+    bottom: 190px; /* sits above the bottom-center nav panel, not overlapping it */
+    left: 10px;
+    width: calc(100vw - 20px);
+    max-height: 45vh;
     overflow-y: auto;
-  }
-
-  #nav-panel {
-    bottom: 0;
-    right: 0;
-    left: 0;
-    width: 100%;
-    box-sizing: border-box;
-    border-radius: 16px 16px 0 0;
   }
 }
