@@ -33,7 +33,11 @@ let currentRoute = [];
 let turnPoints = [];
 
 let compassActive = false;
-let lastHeading = null; // NEW: used to throttle small/noisy compass changes
+let lastHeading = null;
+
+// NEW: auto-resume-following timer, active only during navigation
+let followResumeTimer = null;
+const FOLLOW_RESUME_DELAY_MS = 4000;
 
 let dataReady = {
   buildings: false,
@@ -194,11 +198,19 @@ map.on('load', () => {
 
   startLiveLocation();
 
-  // These already correctly detect genuine user gestures (vs. our own
-  // programmatic moves) and turn off followMode — unchanged.
-  map.on('dragstart', () => { followMode = false; });
+  // CHANGED: dragstart/zoomstart still immediately pause following
+  // (so a manual gesture is never fought mid-motion), but now they
+  // also SCHEDULE an automatic resume a few seconds later, instead of
+  // requiring the user to tap Recenter forever.
+  map.on('dragstart', () => {
+    followMode = false;
+    scheduleFollowResume();
+  });
   map.on('zoomstart', (e) => {
-    if (e.originalEvent) followMode = false;
+    if (e.originalEvent) {
+      followMode = false;
+      scheduleFollowResume();
+    }
   });
 
 });
@@ -215,6 +227,22 @@ function checkAllDataReady() {
 
 function showLoadError(message) {
   document.getElementById('loading-box').innerHTML = `<p style="color:#c0392b;">${message}</p>`;
+}
+
+
+// NEW: manages the "resume following after a few seconds of no manual
+// interaction" behavior — only active while actively navigating.
+function scheduleFollowResume() {
+  if (!navigationActive) return;
+
+  clearTimeout(followResumeTimer);
+  followResumeTimer = setTimeout(() => {
+    followMode = true;
+    lastHeading = null; // avoid a sudden rotation jump from a stale heading
+    if (originCoord) {
+      map.easeTo({ center: originCoord, duration: 800 });
+    }
+  }, FOLLOW_RESUME_DELAY_MS);
 }
 
 
@@ -259,9 +287,9 @@ function startLiveLocation() {
         userMarker.setLngLat(liveCoord);
       }
 
-      // CHANGED: only re-center the CAMERA POSITION here — rotation is
-      // now handled entirely and separately by handleOrientation(),
-      // gated by followMode there too.
+      // While followMode is on, every GPS update re-centers the camera
+      // on the user — this is what keeps them at the center throughout
+      // navigation by default.
       if (followMode) {
         map.easeTo({ center: liveCoord, duration: 800 });
       }
@@ -321,15 +349,6 @@ function requestCompass() {
   }
 }
 
-// FIX: this was the core cause of the "stiff map" bug.
-// 1) Gated by followMode — if the user has manually panned/zoomed
-//    (which sets followMode = false), compass rotation now stops
-//    fighting them entirely, same as camera re-centering already did.
-// 2) Throttled — ignores heading changes smaller than 4 degrees, since
-//    a raw compass reading jitters constantly even when mostly still.
-// 3) Uses setBearing() (instant, no animation) instead of easeTo() —
-//    stacking dozens of animated easeTo calls per second was itself
-//    part of what made the map feel locked/unresponsive to touch.
 function handleOrientation(event) {
   if (!navigationActive || !followMode) return;
 
@@ -342,7 +361,7 @@ function handleOrientation(event) {
   if (lastHeading !== null) {
     let diff = Math.abs(heading - lastHeading);
     if (diff > 180) diff = 360 - diff;
-    if (diff < 4) return; // ignore small jitter
+    if (diff < 4) return;
   }
 
   lastHeading = heading;
@@ -506,17 +525,12 @@ document.getElementById('start-nav-btn').addEventListener('click', () => {
 
   followMode = true;
   navigationActive = true;
-  lastHeading = null; // reset throttle baseline each time navigation (re)starts
+  lastHeading = null;
 
   requestCompass();
 
   map.stop();
 
-  // CHANGED: simple fixed zoom level around the user, instead of a
-  // tight computed bounding box — avoids the "walled-in by buildings"
-  // issue at very close zoom + steep pitch. 19 is a reasonable
-  // close-up default for a 3D campus view; adjust this single number
-  // if you want it slightly closer or further out.
   map.easeTo({
     center: originCoord,
     zoom: 19,
@@ -536,7 +550,8 @@ document.getElementById('start-nav-btn').addEventListener('click', () => {
 document.getElementById('recenter-btn').addEventListener('click', () => {
   if (!originCoord) return;
   followMode = true;
-  lastHeading = null; // avoid a sudden jump from a stale heading after manual panning
+  lastHeading = null;
+  clearTimeout(followResumeTimer); // manual recenter cancels any pending auto-resume
   map.stop();
   map.easeTo({ center: originCoord, duration: 800 });
 });
@@ -546,6 +561,7 @@ document.getElementById('search-again-btn').addEventListener('click', () => {
   navigationActive = false;
   currentRoute = [];
   turnPoints = [];
+  clearTimeout(followResumeTimer);
 
   document.getElementById('nav-controls').classList.add('hidden');
   document.getElementById('search-controls').classList.remove('hidden');
