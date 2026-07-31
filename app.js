@@ -29,10 +29,11 @@ let watchId = null;
 let followMode = false;
 
 let navigationActive = false;
-let currentRoute = [];      // the FULL original route — never altered, used for turn detection
+let currentRoute = [];
 let turnPoints = [];
 
 let compassActive = false;
+let lastHeading = null; // NEW: used to throttle small/noisy compass changes
 
 let dataReady = {
   buildings: false,
@@ -149,7 +150,6 @@ map.on('load', () => {
       buildingList = extractNamedLocations(data);
       buildingList.sort((a, b) => a.name.localeCompare(b.name));
 
-      // Landing view: whole campus extent, from the real data bounds.
       const campusBbox = turf.bbox(data);
       map.fitBounds(campusBbox, { padding: 40, pitch: 60, duration: 0 });
 
@@ -194,6 +194,8 @@ map.on('load', () => {
 
   startLiveLocation();
 
+  // These already correctly detect genuine user gestures (vs. our own
+  // programmatic moves) and turn off followMode — unchanged.
   map.on('dragstart', () => { followMode = false; });
   map.on('zoomstart', (e) => {
     if (e.originalEvent) followMode = false;
@@ -257,6 +259,9 @@ function startLiveLocation() {
         userMarker.setLngLat(liveCoord);
       }
 
+      // CHANGED: only re-center the CAMERA POSITION here — rotation is
+      // now handled entirely and separately by handleOrientation(),
+      // gated by followMode there too.
       if (followMode) {
         map.easeTo({ center: liveCoord, duration: 800 });
       }
@@ -275,11 +280,6 @@ function startLiveLocation() {
 }
 
 
-// NEW: shortens the visible blue route line as the user progresses,
-// by slicing the ORIGINAL full route (currentRoute) from the point
-// nearest the user's live position through to the destination end.
-// currentRoute itself is never modified — turn detection still relies
-// on the full, original route.
 function updateRouteLineProgress(liveCoord) {
   if (currentRoute.length < 2) return;
 
@@ -292,7 +292,7 @@ function updateRouteLineProgress(liveCoord) {
   try {
     remaining = turf.lineSlice(nearest, endPoint, fullLine);
   } catch (err) {
-    return; // if slicing fails for any edge case, just leave the line as-is
+    return;
   }
 
   map.getSource('route-line-source').setData({
@@ -321,14 +321,32 @@ function requestCompass() {
   }
 }
 
+// FIX: this was the core cause of the "stiff map" bug.
+// 1) Gated by followMode — if the user has manually panned/zoomed
+//    (which sets followMode = false), compass rotation now stops
+//    fighting them entirely, same as camera re-centering already did.
+// 2) Throttled — ignores heading changes smaller than 4 degrees, since
+//    a raw compass reading jitters constantly even when mostly still.
+// 3) Uses setBearing() (instant, no animation) instead of easeTo() —
+//    stacking dozens of animated easeTo calls per second was itself
+//    part of what made the map feel locked/unresponsive to touch.
 function handleOrientation(event) {
-  if (!navigationActive) return;
+  if (!navigationActive || !followMode) return;
+
   let heading = event.webkitCompassHeading;
   if (heading === undefined || heading === null) {
     if (event.alpha === null) return;
     heading = 360 - event.alpha;
   }
-  map.easeTo({ bearing: heading, duration: 300 });
+
+  if (lastHeading !== null) {
+    let diff = Math.abs(heading - lastHeading);
+    if (diff > 180) diff = 360 - diff;
+    if (diff < 4) return; // ignore small jitter
+  }
+
+  lastHeading = heading;
+  map.setBearing(heading);
 }
 
 
@@ -462,9 +480,6 @@ document.getElementById('drive-btn').addEventListener('click', () => {
   document.getElementById('walk-btn').classList.remove('active');
 });
 
-// CHANGED: Search now toggles WITHIN the single merged panel —
-// hides search-controls, shows nav-controls, instead of hiding/showing
-// two separate panel elements.
 document.getElementById('search-btn').addEventListener('click', () => {
   if (!originCoord) {
     updateStatus('Still finding your location — please wait a moment and try again.');
@@ -491,22 +506,20 @@ document.getElementById('start-nav-btn').addEventListener('click', () => {
 
   followMode = true;
   navigationActive = true;
+  lastHeading = null; // reset throttle baseline each time navigation (re)starts
 
   requestCompass();
 
   map.stop();
 
-  // CHANGED: 30 meters instead of 20 — turf.destination takes kilometers,
-  // so 30m = 0.03.
-  const north = turf.destination(originCoord, 0.03, 0, { units: 'kilometers' });
-  const south = turf.destination(originCoord, 0.03, 180, { units: 'kilometers' });
-  const east = turf.destination(originCoord, 0.03, 90, { units: 'kilometers' });
-  const west = turf.destination(originCoord, 0.03, 270, { units: 'kilometers' });
-
-  const closeBbox = turf.bbox(turf.featureCollection([north, south, east, west]));
-
-  map.fitBounds(closeBbox, {
-    padding: 40,
+  // CHANGED: simple fixed zoom level around the user, instead of a
+  // tight computed bounding box — avoids the "walled-in by buildings"
+  // issue at very close zoom + steep pitch. 19 is a reasonable
+  // close-up default for a 3D campus view; adjust this single number
+  // if you want it slightly closer or further out.
+  map.easeTo({
+    center: originCoord,
+    zoom: 19,
     pitch: 60,
     duration: 1000
   });
@@ -523,12 +536,11 @@ document.getElementById('start-nav-btn').addEventListener('click', () => {
 document.getElementById('recenter-btn').addEventListener('click', () => {
   if (!originCoord) return;
   followMode = true;
+  lastHeading = null; // avoid a sudden jump from a stale heading after manual panning
   map.stop();
   map.easeTo({ center: originCoord, duration: 800 });
 });
 
-// CHANGED: "Search again" now toggles WITHIN the single panel —
-// hides nav-controls, shows search-controls again.
 document.getElementById('search-again-btn').addEventListener('click', () => {
   followMode = false;
   navigationActive = false;
@@ -572,7 +584,6 @@ function calculateAndDrawRoute() {
   }
 
   drawRoute(route);
-  // No auto-zoom on Search — map stays where the user left it.
 
   currentRoute = route;
   turnPoints = computeTurnPoints(route);
@@ -638,19 +649,6 @@ function drawRoute(routeCoords) {
 
   map.getSource('route-line-source').setData(routeGeoJSON);
 }
-
-function fitMapToRoute(routeCoords) {
-  map.stop();
-  const routeLine = turf.lineString(routeCoords);
-  const bbox = turf.bbox(routeLine);
-
-  map.fitBounds(bbox, {
-    padding: { top: 50, bottom: 50, left: 360, right: 50 },
-    pitch: 60,
-    duration: 1000
-  });
-}
-
 
 function calculateTotalDistance(routeCoords) {
   let total = 0;
