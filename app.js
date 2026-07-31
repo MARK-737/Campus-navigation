@@ -16,7 +16,7 @@ let driveGraph = {};
 let currentMode = 'walk';
 let originCoord = null;
 let destCoord = null;
-let destName = null; // NEW: tracks the selected destination's Name, for highlighting
+let destName = null;
 
 const WALK_SPEED_MPS = 1.4;
 const DRIVE_SPEED_MPS = 8.3;
@@ -32,7 +32,6 @@ let navigationActive = false;
 let currentRoute = [];
 let turnPoints = [];
 
-// NEW: whether device-orientation (compass) permission/listener is active
 let compassActive = false;
 
 let dataReady = {
@@ -48,9 +47,6 @@ map.on('load', () => {
     data: 'data/data/data/Buildings.geojson'
   });
 
-  // CHANGED: color and height are now 'match' expressions, so a single
-  // selected building (by Name) can be restyled without touching the
-  // rest of the layer.
   map.addLayer({
     id: 'buildings-3d',
     type: 'fill-extrusion',
@@ -219,11 +215,6 @@ function showLoadError(message) {
 }
 
 
-// ── NEW: DESTINATION HIGHLIGHTING ────────────────────────────────────
-// Restyles ONLY the matching building (by Name) in the existing
-// buildings-3d layer — red color, taller extrusion — using a Mapbox
-// 'match' expression, rather than adding a separate layer/marker.
-
 function highlightDestination(name) {
   map.setPaintProperty('buildings-3d', 'fill-extrusion-color', [
     'match', ['get', 'Name'],
@@ -243,8 +234,6 @@ function clearHighlight() {
 }
 
 
-// ── LIVE LOCATION TRACKING ───────────────────────────────────────────
-
 function startLiveLocation() {
   if (!navigator.geolocation) {
     updateStatus('Location is not supported on this browser.');
@@ -257,7 +246,6 @@ function startLiveLocation() {
       originCoord = liveCoord;
 
       if (!userMarker) {
-        // NEW: custom pulsating DOM marker instead of the default pin
         const el = document.createElement('div');
         el.className = 'user-dot-wrapper';
         el.innerHTML = '<div class="user-dot-pulse"></div><div class="user-dot-core"></div>';
@@ -285,19 +273,11 @@ function startLiveLocation() {
 }
 
 
-// ── NEW: HEADING-UP MAP ROTATION (compass-based) ─────────────────────
-// Rotates the map so "up" always matches the direction the user is
-// physically facing, using the device's magnetometer. This works even
-// while stationary, unlike GPS movement-heading. iOS requires this to
-// be requested from inside a direct user tap, which is why it's called
-// from the Start Navigation button handler.
-
 function requestCompass() {
   if (compassActive) return;
 
   if (typeof DeviceOrientationEvent !== 'undefined' &&
       typeof DeviceOrientationEvent.requestPermission === 'function') {
-    // iOS 13+ requires explicit permission, tied to a user gesture
     DeviceOrientationEvent.requestPermission()
       .then(response => {
         if (response === 'granted') {
@@ -307,7 +287,6 @@ function requestCompass() {
       })
       .catch(err => console.error('Compass permission error:', err));
   } else {
-    // Most Android browsers don't require explicit permission
     window.addEventListener('deviceorientation', handleOrientation, true);
     compassActive = true;
   }
@@ -315,9 +294,6 @@ function requestCompass() {
 
 function handleOrientation(event) {
   if (!navigationActive) return;
-  // iOS provides a more accurate 'webkitCompassHeading'; other browsers
-  // provide 'alpha' (degrees, but measured the opposite direction, so
-  // it needs converting to match compass bearing).
   let heading = event.webkitCompassHeading;
   if (heading === undefined || heading === null) {
     if (event.alpha === null) return;
@@ -326,8 +302,6 @@ function handleOrientation(event) {
   map.easeTo({ bearing: heading, duration: 300 });
 }
 
-
-// ── VOICE ASSISTANT ──────────────────────────────────────────────────
 
 function speak(text) {
   if (!window.speechSynthesis) return;
@@ -377,8 +351,6 @@ function computeTurnPoints(routeCoords, angleThreshold = 45, minSegmentMeters = 
 function checkNavigationProgress(liveCoord) {
   if (!destCoord) return;
 
-  // CHANGED: arrival now triggers at 15 meters from the destination
-  // centroid, instead of requiring the user to reach the exact center.
   const distToDest = turf.distance(liveCoord, destCoord, { units: 'meters' });
   if (distToDest < 15) {
     speak('You have arrived at your destination.');
@@ -443,7 +415,7 @@ destInput.addEventListener('input', () => {
       destCoord = match.coord;
       destName = match.name;
       suggestionsBox.innerHTML = '';
-      highlightDestination(match.name); // NEW: highlight as soon as it's picked
+      highlightDestination(match.name);
     });
     suggestionsBox.appendChild(item);
   });
@@ -474,13 +446,9 @@ document.getElementById('search-btn').addEventListener('click', () => {
   updateStatus('Calculating route...');
   calculateAndDrawRoute();
 
-  // Search panel disappears the instant Search is pressed — the nav
-  // panel (bottom-center, always present) is what's left visible.
   document.getElementById('search-panel').classList.add('hidden');
 });
 
-
-// ── NAV PANEL BUTTONS ────────────────────────────────────────────────
 
 document.getElementById('start-nav-btn').addEventListener('click', () => {
   if (!originCoord || currentRoute.length === 0) {
@@ -491,13 +459,10 @@ document.getElementById('start-nav-btn').addEventListener('click', () => {
   followMode = true;
   navigationActive = true;
 
-  requestCompass(); // NEW: user-gesture-triggered compass permission/activation
+  requestCompass();
 
   map.stop();
 
-  // CHANGED: padding now reserves space at the BOTTOM (where the nav
-  // panel sits) instead of the right, so the panel never overlaps the
-  // zoomed-in view.
   const north = turf.destination(originCoord, 0.02, 0, { units: 'kilometers' });
   const south = turf.destination(originCoord, 0.02, 180, { units: 'kilometers' });
   const east = turf.destination(originCoord, 0.02, 90, { units: 'kilometers' });
@@ -547,8 +512,6 @@ document.getElementById('search-again-btn').addEventListener('click', () => {
 });
 
 
-// ── UI HELPER FUNCTIONS ────────────────────────────────────────────
-
 function updateStatus(message) {
   document.getElementById('status').textContent = message;
 }
@@ -557,8 +520,6 @@ function clearRoute() {
   map.getSource('route-line-source').setData({ type: 'FeatureCollection', features: [] });
 }
 
-
-// ── ROUTE CALCULATION AND DRAWING ──────────────────────────────────
 
 function calculateAndDrawRoute() {
   const graph = currentMode === 'walk' ? walkGraph : driveGraph;
@@ -574,7 +535,8 @@ function calculateAndDrawRoute() {
   }
 
   drawRoute(route);
-  fitMapToRoute(route);
+  // Map stays exactly where the user left it — no auto-zoom on Search.
+  // fitMapToRoute is intentionally NOT called here.
 
   currentRoute = route;
   turnPoints = computeTurnPoints(route);
@@ -631,8 +593,6 @@ function fitMapToRoute(routeCoords) {
   const routeLine = turf.lineString(routeCoords);
   const bbox = turf.bbox(routeLine);
 
-  // CHANGED: bottom padding now reserves space for the bottom-center
-  // nav panel, instead of the old right-side padding.
   map.fitBounds(bbox, {
     padding: { top: 50, bottom: 220, left: 50, right: 50 },
     pitch: 60,
@@ -743,26 +703,3 @@ function findShortestPath(graph, startCoord, endCoord) {
 
   return path.map(n => n.split(',').map(Number));
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
