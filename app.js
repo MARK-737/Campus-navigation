@@ -29,7 +29,7 @@ let watchId = null;
 let followMode = false;
 
 let navigationActive = false;
-let currentRoute = [];
+let currentRoute = [];      // the FULL original route — never altered, used for turn detection
 let turnPoints = [];
 
 let compassActive = false;
@@ -149,6 +149,7 @@ map.on('load', () => {
       buildingList = extractNamedLocations(data);
       buildingList.sort((a, b) => a.name.localeCompare(b.name));
 
+      // Landing view: whole campus extent, from the real data bounds.
       const campusBbox = turf.bbox(data);
       map.fitBounds(campusBbox, { padding: 40, pitch: 60, duration: 0 });
 
@@ -262,6 +263,7 @@ function startLiveLocation() {
 
       if (navigationActive) {
         checkNavigationProgress(liveCoord);
+        updateRouteLineProgress(liveCoord);
       }
     },
     (error) => {
@@ -270,6 +272,33 @@ function startLiveLocation() {
     },
     { enableHighAccuracy: true, timeout: 10000 }
   );
+}
+
+
+// NEW: shortens the visible blue route line as the user progresses,
+// by slicing the ORIGINAL full route (currentRoute) from the point
+// nearest the user's live position through to the destination end.
+// currentRoute itself is never modified — turn detection still relies
+// on the full, original route.
+function updateRouteLineProgress(liveCoord) {
+  if (currentRoute.length < 2) return;
+
+  const fullLine = turf.lineString(currentRoute);
+  const userPoint = turf.point(liveCoord);
+  const nearest = turf.nearestPointOnLine(fullLine, userPoint);
+  const endPoint = turf.point(currentRoute[currentRoute.length - 1]);
+
+  let remaining;
+  try {
+    remaining = turf.lineSlice(nearest, endPoint, fullLine);
+  } catch (err) {
+    return; // if slicing fails for any edge case, just leave the line as-is
+  }
+
+  map.getSource('route-line-source').setData({
+    type: 'FeatureCollection',
+    features: [{ type: 'Feature', geometry: remaining.geometry, properties: {} }]
+  });
 }
 
 
@@ -433,6 +462,9 @@ document.getElementById('drive-btn').addEventListener('click', () => {
   document.getElementById('walk-btn').classList.remove('active');
 });
 
+// CHANGED: Search now toggles WITHIN the single merged panel —
+// hides search-controls, shows nav-controls, instead of hiding/showing
+// two separate panel elements.
 document.getElementById('search-btn').addEventListener('click', () => {
   if (!originCoord) {
     updateStatus('Still finding your location — please wait a moment and try again.');
@@ -446,7 +478,8 @@ document.getElementById('search-btn').addEventListener('click', () => {
   updateStatus('Calculating route...');
   calculateAndDrawRoute();
 
-  document.getElementById('search-panel').classList.add('hidden');
+  document.getElementById('search-controls').classList.add('hidden');
+  document.getElementById('nav-controls').classList.remove('hidden');
 });
 
 
@@ -463,15 +496,17 @@ document.getElementById('start-nav-btn').addEventListener('click', () => {
 
   map.stop();
 
-  const north = turf.destination(originCoord, 0.02, 0, { units: 'kilometers' });
-  const south = turf.destination(originCoord, 0.02, 180, { units: 'kilometers' });
-  const east = turf.destination(originCoord, 0.02, 90, { units: 'kilometers' });
-  const west = turf.destination(originCoord, 0.02, 270, { units: 'kilometers' });
+  // CHANGED: 30 meters instead of 20 — turf.destination takes kilometers,
+  // so 30m = 0.03.
+  const north = turf.destination(originCoord, 0.03, 0, { units: 'kilometers' });
+  const south = turf.destination(originCoord, 0.03, 180, { units: 'kilometers' });
+  const east = turf.destination(originCoord, 0.03, 90, { units: 'kilometers' });
+  const west = turf.destination(originCoord, 0.03, 270, { units: 'kilometers' });
 
   const closeBbox = turf.bbox(turf.featureCollection([north, south, east, west]));
 
   map.fitBounds(closeBbox, {
-    padding: { top: 40, bottom: 220, left: 40, right: 40 },
+    padding: 40,
     pitch: 60,
     duration: 1000
   });
@@ -492,15 +527,17 @@ document.getElementById('recenter-btn').addEventListener('click', () => {
   map.easeTo({ center: originCoord, duration: 800 });
 });
 
+// CHANGED: "Search again" now toggles WITHIN the single panel —
+// hides nav-controls, shows search-controls again.
 document.getElementById('search-again-btn').addEventListener('click', () => {
   followMode = false;
   navigationActive = false;
   currentRoute = [];
   turnPoints = [];
 
-  document.getElementById('search-panel').classList.remove('hidden');
-  document.getElementById('start-nav-btn').disabled = true;
-  document.getElementById('recenter-btn').disabled = true;
+  document.getElementById('nav-controls').classList.add('hidden');
+  document.getElementById('search-controls').classList.remove('hidden');
+
   document.getElementById('route-summary').textContent = 'Search a destination to see distance and ETA.';
 
   destInput.value = '';
@@ -535,13 +572,27 @@ function calculateAndDrawRoute() {
   }
 
   drawRoute(route);
-  // Map stays exactly where the user left it — no auto-zoom on Search.
-  // fitMapToRoute is intentionally NOT called here.
+  // No auto-zoom on Search — map stays where the user left it.
 
   currentRoute = route;
   turnPoints = computeTurnPoints(route);
 
   const totalMeters = calculateTotalDistance(route);
+
+  const straightLineMeters = turf.distance(originCoord, destCoord, { units: 'meters' });
+  console.log(`[Route debug] Mode: ${currentMode}`);
+  console.log(`[Route debug] Straight-line distance: ${Math.round(straightLineMeters)}m`);
+  console.log(`[Route debug] Actual route distance: ${Math.round(totalMeters)}m`);
+  console.log(`[Route debug] Ratio (route/straight-line): ${(totalMeters / straightLineMeters).toFixed(2)}`);
+  console.log('[Route debug] Nearest start node used:', nearestStart);
+  console.log('[Route debug] Nearest end node used:', nearestEnd);
+  console.log('[Route debug] Full route coordinates (paste into geojson.io to visualize):');
+  console.log(JSON.stringify({
+    type: 'Feature',
+    geometry: { type: 'LineString', coordinates: route },
+    properties: {}
+  }));
+
   const speed = currentMode === 'walk' ? WALK_SPEED_MPS : DRIVE_SPEED_MPS;
   const minutes = Math.max(1, Math.round(totalMeters / speed / 60));
 
@@ -594,7 +645,7 @@ function fitMapToRoute(routeCoords) {
   const bbox = turf.bbox(routeLine);
 
   map.fitBounds(bbox, {
-    padding: { top: 50, bottom: 220, left: 50, right: 50 },
+    padding: { top: 50, bottom: 50, left: 360, right: 50 },
     pitch: 60,
     duration: 1000
   });
