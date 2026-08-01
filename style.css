@@ -82,9 +82,6 @@ html, body { height: 100%; margin: 0; padding: 0; }
   color: #444;
 }
 
-/* CHANGED: font-size raised to 16px — below 16px is what triggers
-   iOS Safari's automatic input-focus zoom, even with the viewport tag
-   in place. This is a second layer of protection for that same bug. */
 #dest-input {
   width: 100%;
   padding: 11px;
@@ -208,17 +205,19 @@ html, body { height: 100%; margin: 0; padding: 0; }
   100% { transform: scale(2.4); opacity: 0; }
 }
 
-/* CHANGED: this is the core structural fix. On mobile, the body becomes
-   a flex column: the map takes all remaining vertical space (flex: 1),
-   and the panel sits below it as a normal, in-flow block — NOT floating
-   on top of the map anymore. The map's visible area now genuinely
-   EXCLUDES the panel's space, so centering the user's GPS position is
-   always accurate with no offset math required. */
+/* CHANGED: 100dvh instead of 100vh — dvh tracks the browser's ACTUAL
+   visible viewport in real time (shrinking/growing as the address bar
+   shows or hides), whereas vh uses a fixed maximum that can be taller
+   than what's really visible, pushing bottom content like this panel
+   off-screen on some phones. A 100vh fallback is kept first for older
+   browsers that don't support dvh yet — the dvh rule below overrides
+   it wherever it IS supported. */
 @media (max-width: 600px) {
   body {
     display: flex;
     flex-direction: column;
     height: 100vh;
+    height: 100dvh;
     overflow: hidden;
   }
 
@@ -226,6 +225,7 @@ html, body { height: 100%; margin: 0; padding: 0; }
     position: static;
     flex: 1 1 auto;
     width: 100%;
+    min-height: 0; /* allows flex-shrink to actually work correctly here */
   }
 
   #panel {
@@ -236,7 +236,12 @@ html, body { height: 100%; margin: 0; padding: 0; }
     width: 100%;
     box-sizing: border-box;
     border-radius: 16px 16px 0 0;
-    max-height: 50vh;
+    /* CHANGED: reduced from 50vh, and now also respects the device's
+       safe area (notch/home-indicator) so the Search button is never
+       hidden behind it */
+    max-height: 42vh;
+    max-height: 42dvh;
     overflow-y: auto;
+    padding-bottom: max(18px, env(safe-area-inset-bottom));
   }
 }

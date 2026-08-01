@@ -21,10 +21,7 @@ let destName = null;
 const WALK_SPEED_MPS = 1.4;
 const DRIVE_SPEED_MPS = 8.3;
 
-// NEW: the zoom level held throughout active navigation, so the camera
-// stays reasonably close to the user instead of whatever zoom it
-// happened to be at before Start Navigation was pressed.
-const NAV_ZOOM = 17;
+const NAV_ZOOM = 19;
 
 let buildingList = [];
 
@@ -242,7 +239,6 @@ function scheduleFollowResume() {
     followMode = true;
     lastHeading = null;
     if (originCoord) {
-      // CHANGED: now holds NAV_ZOOM when auto-resuming during navigation.
       map.easeTo({ center: originCoord, zoom: NAV_ZOOM, duration: 800 });
     }
   }, FOLLOW_RESUME_DELAY_MS);
@@ -290,9 +286,6 @@ function startLiveLocation() {
         userMarker.setLngLat(liveCoord);
       }
 
-      // CHANGED: while followMode is active DURING NAVIGATION, hold
-      // NAV_ZOOM on every GPS-driven recenter, so the view stays close
-      // throughout, not just at the first moment.
       if (followMode) {
         const zoomTarget = navigationActive ? NAV_ZOOM : map.getZoom();
         map.easeTo({ center: liveCoord, zoom: zoomTarget, duration: 800 });
@@ -312,6 +305,9 @@ function startLiveLocation() {
 }
 
 
+// CHANGED: this now also recalculates and displays LIVE distance/ETA,
+// using the same "remaining route" slice that already shortens the
+// blue line — so the numbers count down in sync with the visible line.
 function updateRouteLineProgress(liveCoord) {
   if (currentRoute.length < 2) return;
 
@@ -331,6 +327,16 @@ function updateRouteLineProgress(liveCoord) {
     type: 'FeatureCollection',
     features: [{ type: 'Feature', geometry: remaining.geometry, properties: {} }]
   });
+
+  // NEW: measure the remaining distance from the sliced line itself,
+  // and recompute the ETA from it — this is what makes both numbers
+  // count down as the user physically gets closer.
+  const remainingMeters = calculateTotalDistance(remaining.geometry.coordinates);
+  const speed = currentMode === 'walk' ? WALK_SPEED_MPS : DRIVE_SPEED_MPS;
+  const remainingMinutes = Math.max(1, Math.round(remainingMeters / speed / 60));
+
+  document.getElementById('route-summary').textContent =
+    `${Math.round(remainingMeters)}m • approx. ${remainingMinutes} min ${currentMode === 'walk' ? 'walk' : 'drive'}`;
 }
 
 
@@ -536,7 +542,6 @@ document.getElementById('start-nav-btn').addEventListener('click', () => {
   requestCompass();
 
   map.stop();
-  // CHANGED: now zooms in to NAV_ZOOM immediately when navigation starts.
   map.easeTo({ center: originCoord, zoom: NAV_ZOOM, duration: 800 });
 
   updateStatus('Navigating — follow the blue line.');
@@ -554,8 +559,6 @@ document.getElementById('recenter-btn').addEventListener('click', () => {
   lastHeading = null;
   clearTimeout(followResumeTimer);
   map.stop();
-  // CHANGED: Recenter also restores NAV_ZOOM while navigating (falls
-  // back to the current zoom if somehow pressed outside navigation).
   const zoomTarget = navigationActive ? NAV_ZOOM : map.getZoom();
   map.easeTo({ center: originCoord, zoom: zoomTarget, duration: 800 });
 });
