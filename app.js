@@ -24,7 +24,7 @@ const DRIVE_SPEED_MPS = 8.3;
 // NEW: the zoom level held throughout active navigation, so the camera
 // stays reasonably close to the user instead of whatever zoom it
 // happened to be at before Start Navigation was pressed.
-const NAV_ZOOM = 19;
+const NAV_ZOOM = 17;
 
 let buildingList = [];
 
