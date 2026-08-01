@@ -21,6 +21,11 @@ let destName = null;
 const WALK_SPEED_MPS = 1.4;
 const DRIVE_SPEED_MPS = 8.3;
 
+// NEW: the zoom level held throughout active navigation, so the camera
+// stays reasonably close to the user instead of whatever zoom it
+// happened to be at before Start Navigation was pressed.
+const NAV_ZOOM = 19;
+
 let buildingList = [];
 
 let userMarker = null;
@@ -210,11 +215,6 @@ map.on('load', () => {
 
 });
 
-// NEW: whenever the browser window changes size (including mobile
-// orientation changes, or the on-screen keyboard appearing/disappearing),
-// tell Mapbox to recheck its container's actual pixel dimensions.
-// Without this, Mapbox can keep using stale dimensions from before a
-// layout change, which causes incorrect centering.
 window.addEventListener('resize', () => {
   map.resize();
 });
@@ -242,7 +242,8 @@ function scheduleFollowResume() {
     followMode = true;
     lastHeading = null;
     if (originCoord) {
-      map.easeTo({ center: originCoord, duration: 800 });
+      // CHANGED: now holds NAV_ZOOM when auto-resuming during navigation.
+      map.easeTo({ center: originCoord, zoom: NAV_ZOOM, duration: 800 });
     }
   }, FOLLOW_RESUME_DELAY_MS);
 }
@@ -289,12 +290,12 @@ function startLiveLocation() {
         userMarker.setLngLat(liveCoord);
       }
 
-      // CHANGED: plain centering, no offset — the map's actual visible
-      // area now genuinely excludes the panel (via the CSS flex layout
-      // on mobile), so simple centering is accurate without any
-      // manual pixel-offset math.
+      // CHANGED: while followMode is active DURING NAVIGATION, hold
+      // NAV_ZOOM on every GPS-driven recenter, so the view stays close
+      // throughout, not just at the first moment.
       if (followMode) {
-        map.easeTo({ center: liveCoord, duration: 800 });
+        const zoomTarget = navigationActive ? NAV_ZOOM : map.getZoom();
+        map.easeTo({ center: liveCoord, zoom: zoomTarget, duration: 800 });
       }
 
       if (navigationActive) {
@@ -518,10 +519,6 @@ document.getElementById('search-btn').addEventListener('click', () => {
   document.getElementById('search-controls').classList.add('hidden');
   document.getElementById('nav-controls').classList.remove('hidden');
 
-  // NEW: the panel's content just changed (search controls swapped for
-  // nav controls), which can change its height on mobile — resize the
-  // map right after, so it correctly recalculates its now-different
-  // available space.
   setTimeout(() => map.resize(), 50);
 });
 
@@ -539,7 +536,8 @@ document.getElementById('start-nav-btn').addEventListener('click', () => {
   requestCompass();
 
   map.stop();
-  map.easeTo({ center: originCoord, duration: 800 });
+  // CHANGED: now zooms in to NAV_ZOOM immediately when navigation starts.
+  map.easeTo({ center: originCoord, zoom: NAV_ZOOM, duration: 800 });
 
   updateStatus('Navigating — follow the blue line.');
 
@@ -556,7 +554,10 @@ document.getElementById('recenter-btn').addEventListener('click', () => {
   lastHeading = null;
   clearTimeout(followResumeTimer);
   map.stop();
-  map.easeTo({ center: originCoord, duration: 800 });
+  // CHANGED: Recenter also restores NAV_ZOOM while navigating (falls
+  // back to the current zoom if somehow pressed outside navigation).
+  const zoomTarget = navigationActive ? NAV_ZOOM : map.getZoom();
+  map.easeTo({ center: originCoord, zoom: zoomTarget, duration: 800 });
 });
 
 document.getElementById('search-again-btn').addEventListener('click', () => {
@@ -578,8 +579,6 @@ document.getElementById('search-again-btn').addEventListener('click', () => {
   clearRoute();
   updateStatus('Search for a destination to begin.');
 
-  // NEW: same reasoning as the Search handler — panel content/height
-  // changed again, resize the map afterward.
   setTimeout(() => map.resize(), 50);
 });
 
