@@ -16,7 +16,7 @@ let driveGraph = {};
 let currentMode = 'walk';
 let originCoord = null;
 let destCoord = null;
-let destName = null;
+let destName = null; // NEW: tracks the selected destination's Name, for highlighting
 
 const WALK_SPEED_MPS = 1.4;
 const DRIVE_SPEED_MPS = 8.3;
@@ -32,44 +32,13 @@ let navigationActive = false;
 let currentRoute = [];
 let turnPoints = [];
 
+// NEW: whether device-orientation (compass) permission/listener is active
 let compassActive = false;
-let lastHeading = null;
-
-let followResumeTimer = null;
-const FOLLOW_RESUME_DELAY_MS = 4000;
 
 let dataReady = {
   buildings: false,
   network: false
 };
-
-
-// NEW: calculates a pixel offset so the camera centers the user's real
-// position within the VISIBLE map area, not the full canvas — since the
-// panel can cover a large portion of the screen (especially on mobile,
-// where it's bottom-anchored and up to 70% of the screen height). This
-// is the actual fix for "recenter shows somewhere else" — the map WAS
-// centering correctly on the full canvas, it was just landing behind
-// the panel.
-function getFollowOffset() {
-  const panel = document.getElementById('panel');
-  if (!panel) return [0, 0];
-
-  const panelRect = panel.getBoundingClientRect();
-  const panelVisibleHeight = panelRect.height;
-
-  if (window.innerWidth <= 600) {
-    // Mobile: panel is bottom-anchored, covering the lower portion of
-    // the screen. Shift the target UP (negative Y) by half the panel's
-    // height, so it centers within the remaining visible strip above it.
-    return [0, -(panelVisibleHeight / 2)];
-  } else {
-    // Desktop: panel is a smaller top-left box. Its visual impact on
-    // centering is minor, but we still nudge slightly right/down away
-    // from it for consistency, using a fraction of its width.
-    return [panelRect.width / 4, 0];
-  }
-}
 
 
 map.on('load', () => {
@@ -79,6 +48,9 @@ map.on('load', () => {
     data: 'data/data/data/Buildings.geojson'
   });
 
+  // CHANGED: color and height are now 'match' expressions, so a single
+  // selected building (by Name) can be restyled without touching the
+  // rest of the layer.
   map.addLayer({
     id: 'buildings-3d',
     type: 'fill-extrusion',
@@ -225,15 +197,9 @@ map.on('load', () => {
 
   startLiveLocation();
 
-  map.on('dragstart', () => {
-    followMode = false;
-    scheduleFollowResume();
-  });
+  map.on('dragstart', () => { followMode = false; });
   map.on('zoomstart', (e) => {
-    if (e.originalEvent) {
-      followMode = false;
-      scheduleFollowResume();
-    }
+    if (e.originalEvent) followMode = false;
   });
 
 });
@@ -253,21 +219,10 @@ function showLoadError(message) {
 }
 
 
-function scheduleFollowResume() {
-  if (!navigationActive) return;
-
-  clearTimeout(followResumeTimer);
-  followResumeTimer = setTimeout(() => {
-    followMode = true;
-    lastHeading = null;
-    if (originCoord) {
-      // CHANGED: now passes the panel-aware offset, same as every other
-      // recentering call below.
-      map.easeTo({ center: originCoord, offset: getFollowOffset(), duration: 800 });
-    }
-  }, FOLLOW_RESUME_DELAY_MS);
-}
-
+// ── NEW: DESTINATION HIGHLIGHTING ────────────────────────────────────
+// Restyles ONLY the matching building (by Name) in the existing
+// buildings-3d layer — red color, taller extrusion — using a Mapbox
+// 'match' expression, rather than adding a separate layer/marker.
 
 function highlightDestination(name) {
   map.setPaintProperty('buildings-3d', 'fill-extrusion-color', [
@@ -288,6 +243,8 @@ function clearHighlight() {
 }
 
 
+// ── LIVE LOCATION TRACKING ───────────────────────────────────────────
+
 function startLiveLocation() {
   if (!navigator.geolocation) {
     updateStatus('Location is not supported on this browser.');
@@ -300,6 +257,7 @@ function startLiveLocation() {
       originCoord = liveCoord;
 
       if (!userMarker) {
+        // NEW: custom pulsating DOM marker instead of the default pin
         const el = document.createElement('div');
         el.className = 'user-dot-wrapper';
         el.innerHTML = '<div class="user-dot-pulse"></div><div class="user-dot-core"></div>';
@@ -310,16 +268,12 @@ function startLiveLocation() {
         userMarker.setLngLat(liveCoord);
       }
 
-      // CHANGED: added the panel-aware offset here too — this is the
-      // continuous re-centering that runs on every GPS update while
-      // followMode is on.
       if (followMode) {
-        map.easeTo({ center: liveCoord, offset: getFollowOffset(), duration: 800 });
+        map.easeTo({ center: liveCoord, duration: 800 });
       }
 
       if (navigationActive) {
         checkNavigationProgress(liveCoord);
-        updateRouteLineProgress(liveCoord);
       }
     },
     (error) => {
@@ -331,33 +285,19 @@ function startLiveLocation() {
 }
 
 
-function updateRouteLineProgress(liveCoord) {
-  if (currentRoute.length < 2) return;
-
-  const fullLine = turf.lineString(currentRoute);
-  const userPoint = turf.point(liveCoord);
-  const nearest = turf.nearestPointOnLine(fullLine, userPoint);
-  const endPoint = turf.point(currentRoute[currentRoute.length - 1]);
-
-  let remaining;
-  try {
-    remaining = turf.lineSlice(nearest, endPoint, fullLine);
-  } catch (err) {
-    return;
-  }
-
-  map.getSource('route-line-source').setData({
-    type: 'FeatureCollection',
-    features: [{ type: 'Feature', geometry: remaining.geometry, properties: {} }]
-  });
-}
-
+// ── NEW: HEADING-UP MAP ROTATION (compass-based) ─────────────────────
+// Rotates the map so "up" always matches the direction the user is
+// physically facing, using the device's magnetometer. This works even
+// while stationary, unlike GPS movement-heading. iOS requires this to
+// be requested from inside a direct user tap, which is why it's called
+// from the Start Navigation button handler.
 
 function requestCompass() {
   if (compassActive) return;
 
   if (typeof DeviceOrientationEvent !== 'undefined' &&
       typeof DeviceOrientationEvent.requestPermission === 'function') {
+    // iOS 13+ requires explicit permission, tied to a user gesture
     DeviceOrientationEvent.requestPermission()
       .then(response => {
         if (response === 'granted') {
@@ -367,30 +307,27 @@ function requestCompass() {
       })
       .catch(err => console.error('Compass permission error:', err));
   } else {
+    // Most Android browsers don't require explicit permission
     window.addEventListener('deviceorientation', handleOrientation, true);
     compassActive = true;
   }
 }
 
 function handleOrientation(event) {
-  if (!navigationActive || !followMode) return;
-
+  if (!navigationActive) return;
+  // iOS provides a more accurate 'webkitCompassHeading'; other browsers
+  // provide 'alpha' (degrees, but measured the opposite direction, so
+  // it needs converting to match compass bearing).
   let heading = event.webkitCompassHeading;
   if (heading === undefined || heading === null) {
     if (event.alpha === null) return;
     heading = 360 - event.alpha;
   }
-
-  if (lastHeading !== null) {
-    let diff = Math.abs(heading - lastHeading);
-    if (diff > 180) diff = 360 - diff;
-    if (diff < 4) return;
-  }
-
-  lastHeading = heading;
-  map.setBearing(heading);
+  map.easeTo({ bearing: heading, duration: 300 });
 }
 
+
+// ── VOICE ASSISTANT ──────────────────────────────────────────────────
 
 function speak(text) {
   if (!window.speechSynthesis) return;
@@ -440,6 +377,8 @@ function computeTurnPoints(routeCoords, angleThreshold = 45, minSegmentMeters = 
 function checkNavigationProgress(liveCoord) {
   if (!destCoord) return;
 
+  // CHANGED: arrival now triggers at 15 meters from the destination
+  // centroid, instead of requiring the user to reach the exact center.
   const distToDest = turf.distance(liveCoord, destCoord, { units: 'meters' });
   if (distToDest < 15) {
     speak('You have arrived at your destination.');
@@ -504,7 +443,7 @@ destInput.addEventListener('input', () => {
       destCoord = match.coord;
       destName = match.name;
       suggestionsBox.innerHTML = '';
-      highlightDestination(match.name);
+      highlightDestination(match.name); // NEW: highlight as soon as it's picked
     });
     suggestionsBox.appendChild(item);
   });
@@ -535,10 +474,13 @@ document.getElementById('search-btn').addEventListener('click', () => {
   updateStatus('Calculating route...');
   calculateAndDrawRoute();
 
-  document.getElementById('search-controls').classList.add('hidden');
-  document.getElementById('nav-controls').classList.remove('hidden');
+  // Search panel disappears the instant Search is pressed — the nav
+  // panel (bottom-center, always present) is what's left visible.
+  document.getElementById('search-panel').classList.add('hidden');
 });
 
+
+// ── NAV PANEL BUTTONS ────────────────────────────────────────────────
 
 document.getElementById('start-nav-btn').addEventListener('click', () => {
   if (!originCoord || currentRoute.length === 0) {
@@ -548,18 +490,26 @@ document.getElementById('start-nav-btn').addEventListener('click', () => {
 
   followMode = true;
   navigationActive = true;
-  lastHeading = null;
 
-  requestCompass();
+  requestCompass(); // NEW: user-gesture-triggered compass permission/activation
 
   map.stop();
 
-  // CHANGED: even without a forced zoom, we still explicitly re-center
-  // on the user immediately when navigation starts — WITH the panel
-  // offset — so the very first moment of navigation already shows the
-  // user's dot in the visible area, not just wherever the map happened
-  // to be looking beforehand.
-  map.easeTo({ center: originCoord, offset: getFollowOffset(), duration: 800 });
+  // CHANGED: padding now reserves space at the BOTTOM (where the nav
+  // panel sits) instead of the right, so the panel never overlaps the
+  // zoomed-in view.
+  const north = turf.destination(originCoord, 0.02, 0, { units: 'kilometers' });
+  const south = turf.destination(originCoord, 0.02, 180, { units: 'kilometers' });
+  const east = turf.destination(originCoord, 0.02, 90, { units: 'kilometers' });
+  const west = turf.destination(originCoord, 0.02, 270, { units: 'kilometers' });
+
+  const closeBbox = turf.bbox(turf.featureCollection([north, south, east, west]));
+
+  map.fitBounds(closeBbox, {
+    padding: { top: 40, bottom: 220, left: 40, right: 40 },
+    pitch: 60,
+    duration: 1000
+  });
 
   updateStatus('Navigating — follow the blue line.');
 
@@ -573,11 +523,8 @@ document.getElementById('start-nav-btn').addEventListener('click', () => {
 document.getElementById('recenter-btn').addEventListener('click', () => {
   if (!originCoord) return;
   followMode = true;
-  lastHeading = null;
-  clearTimeout(followResumeTimer);
   map.stop();
-  // CHANGED: offset applied here too — this was the main visible symptom.
-  map.easeTo({ center: originCoord, offset: getFollowOffset(), duration: 800 });
+  map.easeTo({ center: originCoord, duration: 800 });
 });
 
 document.getElementById('search-again-btn').addEventListener('click', () => {
@@ -585,11 +532,10 @@ document.getElementById('search-again-btn').addEventListener('click', () => {
   navigationActive = false;
   currentRoute = [];
   turnPoints = [];
-  clearTimeout(followResumeTimer);
 
-  document.getElementById('nav-controls').classList.add('hidden');
-  document.getElementById('search-controls').classList.remove('hidden');
-
+  document.getElementById('search-panel').classList.remove('hidden');
+  document.getElementById('start-nav-btn').disabled = true;
+  document.getElementById('recenter-btn').disabled = true;
   document.getElementById('route-summary').textContent = 'Search a destination to see distance and ETA.';
 
   destInput.value = '';
@@ -601,6 +547,8 @@ document.getElementById('search-again-btn').addEventListener('click', () => {
 });
 
 
+// ── UI HELPER FUNCTIONS ────────────────────────────────────────────
+
 function updateStatus(message) {
   document.getElementById('status').textContent = message;
 }
@@ -609,6 +557,8 @@ function clearRoute() {
   map.getSource('route-line-source').setData({ type: 'FeatureCollection', features: [] });
 }
 
+
+// ── ROUTE CALCULATION AND DRAWING ──────────────────────────────────
 
 function calculateAndDrawRoute() {
   const graph = currentMode === 'walk' ? walkGraph : driveGraph;
@@ -624,26 +574,12 @@ function calculateAndDrawRoute() {
   }
 
   drawRoute(route);
+  fitMapToRoute(route);
 
   currentRoute = route;
   turnPoints = computeTurnPoints(route);
 
   const totalMeters = calculateTotalDistance(route);
-
-  const straightLineMeters = turf.distance(originCoord, destCoord, { units: 'meters' });
-  console.log(`[Route debug] Mode: ${currentMode}`);
-  console.log(`[Route debug] Straight-line distance: ${Math.round(straightLineMeters)}m`);
-  console.log(`[Route debug] Actual route distance: ${Math.round(totalMeters)}m`);
-  console.log(`[Route debug] Ratio (route/straight-line): ${(totalMeters / straightLineMeters).toFixed(2)}`);
-  console.log('[Route debug] Nearest start node used:', nearestStart);
-  console.log('[Route debug] Nearest end node used:', nearestEnd);
-  console.log('[Route debug] Full route coordinates (paste into geojson.io to visualize):');
-  console.log(JSON.stringify({
-    type: 'Feature',
-    geometry: { type: 'LineString', coordinates: route },
-    properties: {}
-  }));
-
   const speed = currentMode === 'walk' ? WALK_SPEED_MPS : DRIVE_SPEED_MPS;
   const minutes = Math.max(1, Math.round(totalMeters / speed / 60));
 
@@ -689,6 +625,21 @@ function drawRoute(routeCoords) {
 
   map.getSource('route-line-source').setData(routeGeoJSON);
 }
+
+function fitMapToRoute(routeCoords) {
+  map.stop();
+  const routeLine = turf.lineString(routeCoords);
+  const bbox = turf.bbox(routeLine);
+
+  // CHANGED: bottom padding now reserves space for the bottom-center
+  // nav panel, instead of the old right-side padding.
+  map.fitBounds(bbox, {
+    padding: { top: 50, bottom: 220, left: 50, right: 50 },
+    pitch: 60,
+    duration: 1000
+  });
+}
+
 
 function calculateTotalDistance(routeCoords) {
   let total = 0;
