@@ -40,8 +40,9 @@ body { margin: 0; padding: 0; }
   text-align: center;
 }
 
-/* MERGED PANEL — single container, top-left */
-#panel {
+/* CHANGED: search panel now extends further right — wider box anchored
+   at the left, instead of a narrow column hugging the corner. */
+#search-panel {
   position: absolute;
   top: 65px;
   left: 10px;
@@ -54,7 +55,7 @@ body { margin: 0; padding: 0; }
   width: min(460px, calc(100vw - 20px));
 }
 
-.hidden { display: none; }
+#search-panel.hidden { display: none; }
 
 #mode-toggle { display: flex; gap: 8px; margin-bottom: 14px; }
 
@@ -74,7 +75,7 @@ body { margin: 0; padding: 0; }
   border-color: #2a72d4;
 }
 
-#panel label {
+#search-panel label {
   display: block;
   font-size: 13px;
   font-weight: bold;
@@ -127,6 +128,23 @@ body { margin: 0; padding: 0; }
 
 #search-btn:disabled { background: #a9c3e8; cursor: not-allowed; }
 
+/* CHANGED: nav panel moved to bottom-CENTER, on every screen size —
+   no longer right-anchored, and no separate mobile override needed
+   for its position since this layout already works at any width. */
+#nav-panel {
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  background: white;
+  padding: 18px 22px;
+  border-radius: 10px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  font-family: sans-serif;
+  width: min(340px, calc(100vw - 20px));
+}
+
 #route-summary {
   font-size: 18px;
   font-weight: bold;
@@ -173,6 +191,8 @@ body { margin: 0; padding: 0; }
   100% { box-shadow: 0 0 0 0 rgba(30, 136, 229, 0); }
 }
 
+/* NEW: custom pulsating "you are here" marker, replacing the plain
+   default Mapbox pin — same pulse rhythm as the Start Navigation button */
 .user-dot-wrapper {
   width: 22px;
   height: 22px;
@@ -210,15 +230,12 @@ body { margin: 0; padding: 0; }
 }
 
 @media (max-width: 600px) {
-  #panel {
+  #search-panel {
     top: auto;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    width: 100%;
-    box-sizing: border-box;
-    border-radius: 16px 16px 0 0;
-    max-height: 70vh;
+    bottom: 190px; /* sits above the bottom-center nav panel, not overlapping it */
+    left: 10px;
+    width: calc(100vw - 20px);
+    max-height: 45vh;
     overflow-y: auto;
   }
 }

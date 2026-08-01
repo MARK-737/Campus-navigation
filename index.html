@@ -17,33 +17,26 @@
 
   <div id="status-bar"><p id="status">Loading campus data, please wait...</p></div>
 
-  <!-- MERGED: one panel, top-left. Two internal sections toggle visibility
-       inside it — search-controls shown first, nav-controls hidden until
-       Search is pressed. -->
-  <div id="panel">
-
-    <div id="search-controls">
-      <div id="mode-toggle">
-        <button id="walk-btn" class="mode-btn active">Walking</button>
-        <button id="drive-btn" class="mode-btn">Driving</button>
-      </div>
-
-      <label for="dest-input">Where to?</label>
-      <input type="text" id="dest-input" placeholder="Search a building..." disabled autocomplete="off">
-      <div id="suggestions"></div>
-
-      <button id="search-btn" disabled>Search</button>
+  <div id="search-panel">
+    <div id="mode-toggle">
+      <button id="walk-btn" class="mode-btn active">Walking</button>
+      <button id="drive-btn" class="mode-btn">Driving</button>
     </div>
 
-    <div id="nav-controls" class="hidden">
-      <p id="route-summary">Search a destination to see distance and ETA.</p>
-      <div id="nav-buttons">
-        <button id="start-nav-btn">Start Navigation</button>
-        <button id="recenter-btn">Recenter</button>
-        <button id="search-again-btn">Search again</button>
-      </div>
-    </div>
+    <label for="dest-input">Where to?</label>
+    <input type="text" id="dest-input" placeholder="Search a building..." disabled autocomplete="off">
+    <div id="suggestions"></div>
 
+    <button id="search-btn" disabled>Search</button>
+  </div>
+
+  <div id="nav-panel">
+    <p id="route-summary">Search a destination to see distance and ETA.</p>
+    <div id="nav-buttons">
+      <button id="start-nav-btn" disabled>Start Navigation</button>
+      <button id="recenter-btn" disabled>Recenter</button>
+      <button id="search-again-btn">Search again</button>
+    </div>
   </div>
 
   <script src="https://api.mapbox.com/mapbox-gl-js/v3.6.0/mapbox-gl.js"></script>
