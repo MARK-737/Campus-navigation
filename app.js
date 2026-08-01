@@ -23,6 +23,10 @@ const DRIVE_SPEED_MPS = 8.3;
 
 const NAV_ZOOM = 19;
 
+// NEW: how many nearby candidate nodes to consider at each end of a
+// route, when choosing the genuinely shortest overall trip.
+const SNAP_CANDIDATE_COUNT = 5;
+
 let buildingList = [];
 
 let userMarker = null;
@@ -46,27 +50,23 @@ let dataReady = {
 };
 
 
+// NEW: cleans up a building name — trims leading/trailing spaces and
+// collapses any run of multiple spaces down to one. This is what fixes
+// Lecture Theatre A/B: their source data had inconsistent spacing
+// (e.g. "LECTURE THEATRE  A" with a double space), which broke exact
+// string matching used for highlighting.
+function normalizeName(name) {
+  if (!name) return name;
+  return name.trim().replace(/\s+/g, ' ');
+}
+
+
 map.on('load', () => {
 
-  map.addSource('campus-buildings', {
-    type: 'geojson',
-    data: 'data/data/data/Buildings.geojson'
-  });
-
-  map.addLayer({
-    id: 'buildings-3d',
-    type: 'fill-extrusion',
-    source: 'campus-buildings',
-    paint: {
-      'fill-extrusion-color': [
-        'match', ['get', 'Name'],
-        '__none__', '#8899aa',
-        '#8899aa'
-      ],
-      'fill-extrusion-height': ['get', 'Building_H'],
-      'fill-extrusion-opacity': 0.9
-    }
-  });
+  // CHANGED: footpaths, roads, landmarks, and the empty route layer are
+  // added immediately as before — but Buildings is now added LATER,
+  // inside the fetch below, using the cleaned-up data directly, instead
+  // of pointing at the raw file URL.
 
   map.addSource('campus-paths', {
     type: 'geojson',
@@ -146,12 +146,49 @@ map.on('load', () => {
     map.getCanvas().style.cursor = '';
   });
 
+  // CHANGED: Buildings.geojson is now fetched ONCE here, its Name
+  // properties normalized, and this same cleaned-up object is used to
+  // BOTH add the map source AND populate the search list — guaranteeing
+  // the layer and the search results always agree on exact names.
   fetch('data/data/data/Buildings.geojson')
     .then(res => {
       if (!res.ok) throw new Error(`Server responded with ${res.status}`);
       return res.json();
     })
     .then(data => {
+      data.features.forEach(feature => {
+        feature.properties.Name = normalizeName(feature.properties.Name);
+      });
+
+      map.addSource('campus-buildings', {
+        type: 'geojson',
+        data: data
+      });
+
+      map.addLayer({
+        id: 'buildings-3d',
+        type: 'fill-extrusion',
+        source: 'campus-buildings',
+        paint: {
+          'fill-extrusion-color': [
+            'match', ['get', 'Name'],
+            '__none__', '#8899aa',
+            '#8899aa'
+          ],
+          'fill-extrusion-height': ['get', 'Building_H'],
+          'fill-extrusion-opacity': 0.9
+        }
+      });
+
+      map.on('click', 'buildings-3d', (e) => {
+        if (!dataReady.buildings || !dataReady.network) return;
+        destCoord = [e.lngLat.lng, e.lngLat.lat];
+        destName = normalizeName(e.features[0].properties.Name) || null;
+        document.getElementById('dest-input').value = destName || 'Selected on map';
+        document.getElementById('suggestions').innerHTML = '';
+        if (destName) highlightDestination(destName);
+      });
+
       buildingList = extractNamedLocations(data);
       buildingList.sort((a, b) => a.name.localeCompare(b.name));
 
@@ -187,15 +224,6 @@ map.on('load', () => {
       console.error('Failed to load CampusNetwork.geojson:', err);
       showLoadError('Could not load routing data. Please refresh, or check your connection.');
     });
-
-  map.on('click', 'buildings-3d', (e) => {
-    if (!dataReady.buildings || !dataReady.network) return;
-    destCoord = [e.lngLat.lng, e.lngLat.lat];
-    destName = e.features[0].properties.Name || null;
-    document.getElementById('dest-input').value = destName || 'Selected on map';
-    document.getElementById('suggestions').innerHTML = '';
-    if (destName) highlightDestination(destName);
-  });
 
   startLiveLocation();
 
@@ -305,9 +333,6 @@ function startLiveLocation() {
 }
 
 
-// CHANGED: this now also recalculates and displays LIVE distance/ETA,
-// using the same "remaining route" slice that already shortens the
-// blue line — so the numbers count down in sync with the visible line.
 function updateRouteLineProgress(liveCoord) {
   if (currentRoute.length < 2) return;
 
@@ -328,9 +353,6 @@ function updateRouteLineProgress(liveCoord) {
     features: [{ type: 'Feature', geometry: remaining.geometry, properties: {} }]
   });
 
-  // NEW: measure the remaining distance from the sliced line itself,
-  // and recompute the ETA from it — this is what makes both numbers
-  // count down as the user physically gets closer.
   const remainingMeters = calculateTotalDistance(remaining.geometry.coordinates);
   const speed = currentMode === 'walk' ? WALK_SPEED_MPS : DRIVE_SPEED_MPS;
   const remainingMinutes = Math.max(1, Math.round(remainingMeters / speed / 60));
@@ -595,33 +617,76 @@ function clearRoute() {
 }
 
 
+// NEW: replaces the old single-nearest-node snapping. Finds the N
+// closest graph nodes to a given coordinate, sorted nearest-first,
+// each tagged with its straight-line distance — used to build a set
+// of realistic candidate start/end points instead of blindly trusting
+// whichever single node happens to be physically closest.
+function findNearestNodes(graph, coord, count) {
+  const candidates = Object.keys(graph).map(nodeKey => {
+    const nodeCoord = nodeKey.split(',').map(Number);
+    const dist = turf.distance(coord, nodeCoord, { units: 'meters' });
+    return { node: nodeCoord, dist };
+  });
+
+  candidates.sort((a, b) => a.dist - b.dist);
+  return candidates.slice(0, count);
+}
+
 function calculateAndDrawRoute() {
   const graph = currentMode === 'walk' ? walkGraph : driveGraph;
 
-  const nearestStart = findNearestNode(graph, originCoord);
-  const nearestEnd = findNearestNode(graph, destCoord);
+  // CHANGED: instead of one nearest node per side, gather several
+  // candidates at both ends, run Dijkstra across every combination,
+  // and keep whichever produces the smallest TOTAL trip distance
+  // (walk-to-start-node + graph path + walk-from-end-node). This is
+  // what makes genuinely shorter routes win over merely closer snap
+  // points.
+  const startCandidates = findNearestNodes(graph, originCoord, SNAP_CANDIDATE_COUNT);
+  const endCandidates = findNearestNodes(graph, destCoord, SNAP_CANDIDATE_COUNT);
 
-  const route = findShortestPath(graph, nearestStart, nearestEnd);
+  let bestRoute = null;
+  let bestTotal = Infinity;
+  let bestStartSnap = 0;
+  let bestEndSnap = 0;
 
-  if (!route) {
+  startCandidates.forEach(startC => {
+    endCandidates.forEach(endC => {
+      const candidateRoute = findShortestPath(graph, startC.node, endC.node);
+      if (!candidateRoute) return;
+
+      const graphDist = calculateTotalDistance(candidateRoute);
+      const total = startC.dist + graphDist + endC.dist;
+
+      if (total < bestTotal) {
+        bestTotal = total;
+        bestRoute = candidateRoute;
+        bestStartSnap = startC.dist;
+        bestEndSnap = endC.dist;
+      }
+    });
+  });
+
+  if (!bestRoute) {
     updateStatus('No route found for this mode. Try a different destination or mode.');
     return;
   }
+
+  const route = bestRoute;
 
   drawRoute(route);
 
   currentRoute = route;
   turnPoints = computeTurnPoints(route);
 
-  const totalMeters = calculateTotalDistance(route);
+  const totalMeters = bestTotal;
 
   const straightLineMeters = turf.distance(originCoord, destCoord, { units: 'meters' });
   console.log(`[Route debug] Mode: ${currentMode}`);
   console.log(`[Route debug] Straight-line distance: ${Math.round(straightLineMeters)}m`);
-  console.log(`[Route debug] Actual route distance: ${Math.round(totalMeters)}m`);
+  console.log(`[Route debug] Chosen total route distance: ${Math.round(totalMeters)}m (start snap: ${Math.round(bestStartSnap)}m, end snap: ${Math.round(bestEndSnap)}m)`);
   console.log(`[Route debug] Ratio (route/straight-line): ${(totalMeters / straightLineMeters).toFixed(2)}`);
-  console.log('[Route debug] Nearest start node used:', nearestStart);
-  console.log('[Route debug] Nearest end node used:', nearestEnd);
+  console.log(`[Route debug] Considered ${startCandidates.length * endCandidates.length} start/end combinations`);
   console.log('[Route debug] Full route coordinates (paste into geojson.io to visualize):');
   console.log(JSON.stringify({
     type: 'Feature',
@@ -639,22 +704,6 @@ function calculateAndDrawRoute() {
   document.getElementById('recenter-btn').disabled = false;
 
   updateStatus('Route ready. Tap Start Navigation when you\'re ready to go.');
-}
-
-function findNearestNode(graph, clickCoord) {
-  let nearest = null;
-  let minDist = Infinity;
-
-  Object.keys(graph).forEach(nodeKey => {
-    const nodeCoord = nodeKey.split(',').map(Number);
-    const dist = turf.distance(clickCoord, nodeCoord, { units: 'meters' });
-    if (dist < minDist) {
-      minDist = dist;
-      nearest = nodeCoord;
-    }
-  });
-
-  return nearest;
 }
 
 function drawRoute(routeCoords) {
