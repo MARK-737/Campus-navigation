@@ -1,4 +1,5 @@
-body { margin: 0; padding: 0; }
+html, body { height: 100%; margin: 0; padding: 0; }
+
 #map { position: absolute; top: 0; bottom: 0; width: 100%; }
 
 #loading-overlay {
@@ -40,9 +41,7 @@ body { margin: 0; padding: 0; }
   text-align: center;
 }
 
-/* CHANGED: search panel now extends further right — wider box anchored
-   at the left, instead of a narrow column hugging the corner. */
-#search-panel {
+#panel {
   position: absolute;
   top: 65px;
   left: 10px;
@@ -55,7 +54,7 @@ body { margin: 0; padding: 0; }
   width: min(460px, calc(100vw - 20px));
 }
 
-#search-panel.hidden { display: none; }
+.hidden { display: none; }
 
 #mode-toggle { display: flex; gap: 8px; margin-bottom: 14px; }
 
@@ -75,7 +74,7 @@ body { margin: 0; padding: 0; }
   border-color: #2a72d4;
 }
 
-#search-panel label {
+#panel label {
   display: block;
   font-size: 13px;
   font-weight: bold;
@@ -83,12 +82,15 @@ body { margin: 0; padding: 0; }
   color: #444;
 }
 
+/* CHANGED: font-size raised to 16px — below 16px is what triggers
+   iOS Safari's automatic input-focus zoom, even with the viewport tag
+   in place. This is a second layer of protection for that same bug. */
 #dest-input {
   width: 100%;
   padding: 11px;
   border-radius: 5px;
   border: 1px solid #ccc;
-  font-size: 15px;
+  font-size: 16px;
   box-sizing: border-box;
 }
 
@@ -127,23 +129,6 @@ body { margin: 0; padding: 0; }
 }
 
 #search-btn:disabled { background: #a9c3e8; cursor: not-allowed; }
-
-/* CHANGED: nav panel moved to bottom-CENTER, on every screen size —
-   no longer right-anchored, and no separate mobile override needed
-   for its position since this layout already works at any width. */
-#nav-panel {
-  position: absolute;
-  bottom: 10px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 6;
-  background: white;
-  padding: 18px 22px;
-  border-radius: 10px;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-  font-family: sans-serif;
-  width: min(340px, calc(100vw - 20px));
-}
 
 #route-summary {
   font-size: 18px;
@@ -191,13 +176,7 @@ body { margin: 0; padding: 0; }
   100% { box-shadow: 0 0 0 0 rgba(30, 136, 229, 0); }
 }
 
-/* NEW: custom pulsating "you are here" marker, replacing the plain
-   default Mapbox pin — same pulse rhythm as the Start Navigation button */
-.user-dot-wrapper {
-  width: 22px;
-  height: 22px;
-  position: relative;
-}
+.user-dot-wrapper { width: 22px; height: 22px; position: relative; }
 
 .user-dot-core {
   width: 16px;
@@ -229,13 +208,35 @@ body { margin: 0; padding: 0; }
   100% { transform: scale(2.4); opacity: 0; }
 }
 
+/* CHANGED: this is the core structural fix. On mobile, the body becomes
+   a flex column: the map takes all remaining vertical space (flex: 1),
+   and the panel sits below it as a normal, in-flow block — NOT floating
+   on top of the map anymore. The map's visible area now genuinely
+   EXCLUDES the panel's space, so centering the user's GPS position is
+   always accurate with no offset math required. */
 @media (max-width: 600px) {
-  #search-panel {
+  body {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  #map {
+    position: static;
+    flex: 1 1 auto;
+    width: 100%;
+  }
+
+  #panel {
+    position: static;
+    flex: 0 0 auto;
     top: auto;
-    bottom: 190px; /* sits above the bottom-center nav panel, not overlapping it */
-    left: 10px;
-    width: calc(100vw - 20px);
-    max-height: 45vh;
+    left: auto;
+    width: 100%;
+    box-sizing: border-box;
+    border-radius: 16px 16px 0 0;
+    max-height: 50vh;
     overflow-y: auto;
   }
 }
