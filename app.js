@@ -44,6 +44,34 @@ let dataReady = {
 };
 
 
+// NEW: calculates a pixel offset so the camera centers the user's real
+// position within the VISIBLE map area, not the full canvas — since the
+// panel can cover a large portion of the screen (especially on mobile,
+// where it's bottom-anchored and up to 70% of the screen height). This
+// is the actual fix for "recenter shows somewhere else" — the map WAS
+// centering correctly on the full canvas, it was just landing behind
+// the panel.
+function getFollowOffset() {
+  const panel = document.getElementById('panel');
+  if (!panel) return [0, 0];
+
+  const panelRect = panel.getBoundingClientRect();
+  const panelVisibleHeight = panelRect.height;
+
+  if (window.innerWidth <= 600) {
+    // Mobile: panel is bottom-anchored, covering the lower portion of
+    // the screen. Shift the target UP (negative Y) by half the panel's
+    // height, so it centers within the remaining visible strip above it.
+    return [0, -(panelVisibleHeight / 2)];
+  } else {
+    // Desktop: panel is a smaller top-left box. Its visual impact on
+    // centering is minor, but we still nudge slightly right/down away
+    // from it for consistency, using a fraction of its width.
+    return [panelRect.width / 4, 0];
+  }
+}
+
+
 map.on('load', () => {
 
   map.addSource('campus-buildings', {
@@ -233,7 +261,9 @@ function scheduleFollowResume() {
     followMode = true;
     lastHeading = null;
     if (originCoord) {
-      map.easeTo({ center: originCoord, duration: 800 });
+      // CHANGED: now passes the panel-aware offset, same as every other
+      // recentering call below.
+      map.easeTo({ center: originCoord, offset: getFollowOffset(), duration: 800 });
     }
   }, FOLLOW_RESUME_DELAY_MS);
 }
@@ -280,8 +310,11 @@ function startLiveLocation() {
         userMarker.setLngLat(liveCoord);
       }
 
+      // CHANGED: added the panel-aware offset here too — this is the
+      // continuous re-centering that runs on every GPS update while
+      // followMode is on.
       if (followMode) {
-        map.easeTo({ center: liveCoord, duration: 800 });
+        map.easeTo({ center: liveCoord, offset: getFollowOffset(), duration: 800 });
       }
 
       if (navigationActive) {
@@ -521,10 +554,12 @@ document.getElementById('start-nav-btn').addEventListener('click', () => {
 
   map.stop();
 
-  // Auto-zoom removed — map stays at its current view. followMode
-  // (handled in startLiveLocation) still keeps the camera centered on
-  // the user's live position, just without forcing a specific zoom
-  // level the moment this button is pressed.
+  // CHANGED: even without a forced zoom, we still explicitly re-center
+  // on the user immediately when navigation starts — WITH the panel
+  // offset — so the very first moment of navigation already shows the
+  // user's dot in the visible area, not just wherever the map happened
+  // to be looking beforehand.
+  map.easeTo({ center: originCoord, offset: getFollowOffset(), duration: 800 });
 
   updateStatus('Navigating — follow the blue line.');
 
@@ -541,7 +576,8 @@ document.getElementById('recenter-btn').addEventListener('click', () => {
   lastHeading = null;
   clearTimeout(followResumeTimer);
   map.stop();
-  map.easeTo({ center: originCoord, duration: 800 });
+  // CHANGED: offset applied here too — this was the main visible symptom.
+  map.easeTo({ center: originCoord, offset: getFollowOffset(), duration: 800 });
 });
 
 document.getElementById('search-again-btn').addEventListener('click', () => {
