@@ -656,14 +656,21 @@ function calculateAndDrawRoute() {
     return;
   }
 
-  const route = bestRoute;
+  // NEW: stitches the real origin and real destination onto the ends
+  // of the graph-only path — this is what makes the drawn blue line
+  // (and every distance/turn calculation derived from it) reach all
+  // the way from where you actually are to where you're actually
+  // going, instead of stopping at the nearest path/road node.
+  const route = [originCoord, ...bestRoute, destCoord];
 
   drawRoute(route);
 
   currentRoute = route;
   turnPoints = computeTurnPoints(route);
 
-  const totalMeters = bestTotal;
+  // CHANGED: total distance now measured directly from the complete
+  // stitched route, guaranteeing it always matches what's drawn.
+  const totalMeters = calculateTotalDistance(route);
 
   const straightLineMeters = turf.distance(originCoord, destCoord, { units: 'meters' });
   console.log(`[Route debug] Mode: ${currentMode}`);
@@ -711,14 +718,6 @@ function calculateTotalDistance(routeCoords) {
 }
 
 
-// ── NEW: NETWORK TOPOLOGY REPAIR — splits roads/paths at every real
-// physical intersection, even where the source data never placed a
-// vertex there. This is what fixes "the router won't join/leave a
-// road mid-way, only at its two digitized ends."
-
-// Pulls out every individual 2-point segment from a GeoJSON's features,
-// filtered by mode (walk/drive) — same raw extraction as before, just
-// separated out as its own step now.
 function extractSegments(geojson, modeField) {
   const segments = [];
   geojson.features.forEach(feature => {
@@ -742,8 +741,6 @@ function segmentBBox(seg) {
   };
 }
 
-// Quick cheap check to skip segment pairs that couldn't possibly cross
-// — avoids running the more expensive intersection math on every pair.
 function bboxesOverlap(a, b, pad = 0.00002) {
   return !(a.maxX + pad < b.minX || b.maxX + pad < a.minX ||
            a.maxY + pad < b.minY || b.maxY + pad < a.minY);
@@ -753,12 +750,6 @@ function pointsClose(a, b, epsilon = 1e-7) {
   return Math.abs(a[0] - b[0]) < epsilon && Math.abs(a[1] - b[1]) < epsilon;
 }
 
-// The core repair: checks every pair of segments for a genuine physical
-// crossing (using Turf's line intersection), and — wherever one is
-// found that ISN'T already a shared endpoint — records that point as a
-// place where BOTH segments need to be split. Segments are then cut
-// into smaller pieces at those points, so a real graph node ends up
-// exactly where two roads/paths actually cross on the ground.
 function splitSegmentsAtIntersections(segments) {
   const splitPoints = segments.map(() => []);
   const bboxes = segments.map(segmentBBox);
@@ -800,8 +791,6 @@ function splitSegmentsAtIntersections(segments) {
       return;
     }
 
-    // Order the split points along the segment (nearest p1 first), then
-    // chain them into consecutive smaller sub-segments.
     const ordered = extra
       .map(pt => ({ pt, d: turf.distance(p1, pt, { units: 'meters' }) }))
       .sort((a, b) => a.d - b.d);
@@ -822,10 +811,6 @@ function splitSegmentsAtIntersections(segments) {
 }
 
 
-// CHANGED: buildGraph now runs the intersection-splitting repair on the
-// raw segments FIRST, then builds the node/edge graph from the repaired,
-// properly-connected segment list — same snap()+distance logic as
-// before, just fed better-connected input.
 function buildGraph(geojson, modeField) {
   const rawSegments = extractSegments(geojson, modeField);
   const repairedSegments = splitSegmentsAtIntersections(rawSegments);
