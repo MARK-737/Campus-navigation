@@ -23,8 +23,6 @@ const DRIVE_SPEED_MPS = 8.3;
 
 const NAV_ZOOM = 19;
 
-// CHANGED: candidate gathering is now radius-based (meters), with a
-// fixed count kept only as a fallback/cap for very dense areas.
 const SNAP_RADIUS_METERS = 40;
 const SNAP_MAX_CANDIDATES = 10;
 
@@ -59,11 +57,6 @@ function normalizeName(name) {
 
 map.on('load', () => {
 
-  // NEW: disables Mapbox's own built-in generic 3D buildings (the
-  // "white buildings" you didn't digitize) that come baked into the
-  // Standard style's base map. This only affects Mapbox's default
-  // buildings — your own 'buildings-3d' layer, added below, is
-  // completely separate and unaffected.
   map.setConfigProperty('basemap', 'show3dObjects', false);
 
   map.addSource('campus-paths', {
@@ -203,6 +196,7 @@ map.on('load', () => {
       return res.json();
     })
     .then(data => {
+      console.log('[Graph build] Splitting network at real intersections — this may take a moment...');
       walkGraph = buildGraph(data, 'walk');
       driveGraph = buildGraph(data, 'drive');
 
@@ -611,12 +605,6 @@ function clearRoute() {
 }
 
 
-// CHANGED: gathers candidates within a real-world RADIUS (40m) first,
-// falling back to a fixed count only if fewer than 2 nodes exist within
-// that radius (e.g. in a sparse area of the drive graph) — this is
-// more robust than a fixed top-N count, since it won't silently miss
-// a genuinely useful junction just because a few closer-but-useless
-// points happened to rank ahead of it.
 function findNearestNodes(graph, coord) {
   const allCandidates = Object.keys(graph).map(nodeKey => {
     const nodeCoord = nodeKey.split(',').map(Number);
@@ -632,7 +620,6 @@ function findNearestNodes(graph, coord) {
     return withinRadius.slice(0, SNAP_MAX_CANDIDATES);
   }
 
-  // Fallback for sparse areas: just take the closest few regardless of radius.
   return allCandidates.slice(0, SNAP_MAX_CANDIDATES);
 }
 
@@ -684,12 +671,6 @@ function calculateAndDrawRoute() {
   console.log(`[Route debug] Chosen total route distance: ${Math.round(totalMeters)}m (start snap: ${Math.round(bestStartSnap)}m, end snap: ${Math.round(bestEndSnap)}m)`);
   console.log(`[Route debug] Ratio (route/straight-line): ${(totalMeters / straightLineMeters).toFixed(2)}`);
   console.log(`[Route debug] Considered ${startCandidates.length} start candidates × ${endCandidates.length} end candidates`);
-  console.log('[Route debug] Full route coordinates (paste into geojson.io to visualize):');
-  console.log(JSON.stringify({
-    type: 'Feature',
-    geometry: { type: 'LineString', coordinates: route },
-    properties: {}
-  }));
 
   const speed = currentMode === 'walk' ? WALK_SPEED_MPS : DRIVE_SPEED_MPS;
   const minutes = Math.max(1, Math.round(totalMeters / speed / 60));
@@ -730,29 +711,141 @@ function calculateTotalDistance(routeCoords) {
 }
 
 
+// ── NEW: NETWORK TOPOLOGY REPAIR — splits roads/paths at every real
+// physical intersection, even where the source data never placed a
+// vertex there. This is what fixes "the router won't join/leave a
+// road mid-way, only at its two digitized ends."
+
+// Pulls out every individual 2-point segment from a GeoJSON's features,
+// filtered by mode (walk/drive) — same raw extraction as before, just
+// separated out as its own step now.
+function extractSegments(geojson, modeField) {
+  const segments = [];
+  geojson.features.forEach(feature => {
+    if (feature.properties[modeField] !== 1) return;
+    feature.geometry.coordinates.forEach(line => {
+      for (let i = 0; i < line.length - 1; i++) {
+        segments.push([line[i], line[i + 1]]);
+      }
+    });
+  });
+  return segments;
+}
+
+function segmentBBox(seg) {
+  const [p1, p2] = seg;
+  return {
+    minX: Math.min(p1[0], p2[0]),
+    maxX: Math.max(p1[0], p2[0]),
+    minY: Math.min(p1[1], p2[1]),
+    maxY: Math.max(p1[1], p2[1])
+  };
+}
+
+// Quick cheap check to skip segment pairs that couldn't possibly cross
+// — avoids running the more expensive intersection math on every pair.
+function bboxesOverlap(a, b, pad = 0.00002) {
+  return !(a.maxX + pad < b.minX || b.maxX + pad < a.minX ||
+           a.maxY + pad < b.minY || b.maxY + pad < a.minY);
+}
+
+function pointsClose(a, b, epsilon = 1e-7) {
+  return Math.abs(a[0] - b[0]) < epsilon && Math.abs(a[1] - b[1]) < epsilon;
+}
+
+// The core repair: checks every pair of segments for a genuine physical
+// crossing (using Turf's line intersection), and — wherever one is
+// found that ISN'T already a shared endpoint — records that point as a
+// place where BOTH segments need to be split. Segments are then cut
+// into smaller pieces at those points, so a real graph node ends up
+// exactly where two roads/paths actually cross on the ground.
+function splitSegmentsAtIntersections(segments) {
+  const splitPoints = segments.map(() => []);
+  const bboxes = segments.map(segmentBBox);
+
+  for (let i = 0; i < segments.length; i++) {
+    for (let j = i + 1; j < segments.length; j++) {
+      if (!bboxesOverlap(bboxes[i], bboxes[j])) continue;
+
+      const [a1, a2] = segments[i];
+      const [b1, b2] = segments[j];
+
+      let intersections;
+      try {
+        intersections = turf.lineIntersect(
+          turf.lineString([a1, a2]),
+          turf.lineString([b1, b2])
+        );
+      } catch (err) {
+        continue;
+      }
+
+      intersections.features.forEach(f => {
+        const pt = f.geometry.coordinates;
+        const isEndpointOfI = pointsClose(pt, a1) || pointsClose(pt, a2);
+        const isEndpointOfJ = pointsClose(pt, b1) || pointsClose(pt, b2);
+        if (!isEndpointOfI) splitPoints[i].push(pt);
+        if (!isEndpointOfJ) splitPoints[j].push(pt);
+      });
+    }
+  }
+
+  const finalSegments = [];
+  segments.forEach((seg, idx) => {
+    const [p1, p2] = seg;
+    const extra = splitPoints[idx];
+
+    if (extra.length === 0) {
+      finalSegments.push([p1, p2]);
+      return;
+    }
+
+    // Order the split points along the segment (nearest p1 first), then
+    // chain them into consecutive smaller sub-segments.
+    const ordered = extra
+      .map(pt => ({ pt, d: turf.distance(p1, pt, { units: 'meters' }) }))
+      .sort((a, b) => a.d - b.d);
+
+    let prev = p1;
+    ordered.forEach(({ pt }) => {
+      if (!pointsClose(prev, pt)) {
+        finalSegments.push([prev, pt]);
+        prev = pt;
+      }
+    });
+    if (!pointsClose(prev, p2)) {
+      finalSegments.push([prev, p2]);
+    }
+  });
+
+  return finalSegments;
+}
+
+
+// CHANGED: buildGraph now runs the intersection-splitting repair on the
+// raw segments FIRST, then builds the node/edge graph from the repaired,
+// properly-connected segment list — same snap()+distance logic as
+// before, just fed better-connected input.
 function buildGraph(geojson, modeField) {
+  const rawSegments = extractSegments(geojson, modeField);
+  const repairedSegments = splitSegmentsAtIntersections(rawSegments);
+
   const graph = {};
 
   function snap(coord) {
     return coord.map(n => n.toFixed(6)).join(',');
   }
 
-  geojson.features.forEach(feature => {
-    if (feature.properties[modeField] !== 1) return;
+  repairedSegments.forEach(([p1, p2]) => {
+    const nodeA = snap(p1);
+    const nodeB = snap(p2);
+    const dist = turf.distance(p1, p2, { units: 'meters' });
 
-    feature.geometry.coordinates.forEach(line => {
-      for (let i = 0; i < line.length - 1; i++) {
-        const nodeA = snap(line[i]);
-        const nodeB = snap(line[i + 1]);
-        const dist = turf.distance(line[i], line[i + 1], { units: 'meters' });
+    if (!graph[nodeA]) graph[nodeA] = [];
+    if (!graph[nodeB]) graph[nodeB] = [];
 
-        if (!graph[nodeA]) graph[nodeA] = [];
-        if (!graph[nodeB]) graph[nodeB] = [];
-
-        graph[nodeA].push({ node: nodeB, weight: dist });
-        graph[nodeB].push({ node: nodeA, weight: dist });
-      }
-    });
+    graph[nodeA].push({ node: nodeB, weight: dist });
+    graph[nodeB].push({ node: nodeA, weight: dist });
   });
 
   return graph;
