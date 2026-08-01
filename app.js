@@ -23,9 +23,10 @@ const DRIVE_SPEED_MPS = 8.3;
 
 const NAV_ZOOM = 19;
 
-// NEW: how many nearby candidate nodes to consider at each end of a
-// route, when choosing the genuinely shortest overall trip.
-const SNAP_CANDIDATE_COUNT = 5;
+// CHANGED: candidate gathering is now radius-based (meters), with a
+// fixed count kept only as a fallback/cap for very dense areas.
+const SNAP_RADIUS_METERS = 40;
+const SNAP_MAX_CANDIDATES = 10;
 
 let buildingList = [];
 
@@ -50,11 +51,6 @@ let dataReady = {
 };
 
 
-// NEW: cleans up a building name — trims leading/trailing spaces and
-// collapses any run of multiple spaces down to one. This is what fixes
-// Lecture Theatre A/B: their source data had inconsistent spacing
-// (e.g. "LECTURE THEATRE  A" with a double space), which broke exact
-// string matching used for highlighting.
 function normalizeName(name) {
   if (!name) return name;
   return name.trim().replace(/\s+/g, ' ');
@@ -63,10 +59,12 @@ function normalizeName(name) {
 
 map.on('load', () => {
 
-  // CHANGED: footpaths, roads, landmarks, and the empty route layer are
-  // added immediately as before — but Buildings is now added LATER,
-  // inside the fetch below, using the cleaned-up data directly, instead
-  // of pointing at the raw file URL.
+  // NEW: disables Mapbox's own built-in generic 3D buildings (the
+  // "white buildings" you didn't digitize) that come baked into the
+  // Standard style's base map. This only affects Mapbox's default
+  // buildings — your own 'buildings-3d' layer, added below, is
+  // completely separate and unaffected.
+  map.setConfigProperty('basemap', 'show3dObjects', false);
 
   map.addSource('campus-paths', {
     type: 'geojson',
@@ -146,10 +144,6 @@ map.on('load', () => {
     map.getCanvas().style.cursor = '';
   });
 
-  // CHANGED: Buildings.geojson is now fetched ONCE here, its Name
-  // properties normalized, and this same cleaned-up object is used to
-  // BOTH add the map source AND populate the search list — guaranteeing
-  // the layer and the search results always agree on exact names.
   fetch('data/data/data/Buildings.geojson')
     .then(res => {
       if (!res.ok) throw new Error(`Server responded with ${res.status}`);
@@ -617,33 +611,36 @@ function clearRoute() {
 }
 
 
-// NEW: replaces the old single-nearest-node snapping. Finds the N
-// closest graph nodes to a given coordinate, sorted nearest-first,
-// each tagged with its straight-line distance — used to build a set
-// of realistic candidate start/end points instead of blindly trusting
-// whichever single node happens to be physically closest.
-function findNearestNodes(graph, coord, count) {
-  const candidates = Object.keys(graph).map(nodeKey => {
+// CHANGED: gathers candidates within a real-world RADIUS (40m) first,
+// falling back to a fixed count only if fewer than 2 nodes exist within
+// that radius (e.g. in a sparse area of the drive graph) — this is
+// more robust than a fixed top-N count, since it won't silently miss
+// a genuinely useful junction just because a few closer-but-useless
+// points happened to rank ahead of it.
+function findNearestNodes(graph, coord) {
+  const allCandidates = Object.keys(graph).map(nodeKey => {
     const nodeCoord = nodeKey.split(',').map(Number);
     const dist = turf.distance(coord, nodeCoord, { units: 'meters' });
     return { node: nodeCoord, dist };
   });
 
-  candidates.sort((a, b) => a.dist - b.dist);
-  return candidates.slice(0, count);
+  allCandidates.sort((a, b) => a.dist - b.dist);
+
+  const withinRadius = allCandidates.filter(c => c.dist <= SNAP_RADIUS_METERS);
+
+  if (withinRadius.length >= 2) {
+    return withinRadius.slice(0, SNAP_MAX_CANDIDATES);
+  }
+
+  // Fallback for sparse areas: just take the closest few regardless of radius.
+  return allCandidates.slice(0, SNAP_MAX_CANDIDATES);
 }
 
 function calculateAndDrawRoute() {
   const graph = currentMode === 'walk' ? walkGraph : driveGraph;
 
-  // CHANGED: instead of one nearest node per side, gather several
-  // candidates at both ends, run Dijkstra across every combination,
-  // and keep whichever produces the smallest TOTAL trip distance
-  // (walk-to-start-node + graph path + walk-from-end-node). This is
-  // what makes genuinely shorter routes win over merely closer snap
-  // points.
-  const startCandidates = findNearestNodes(graph, originCoord, SNAP_CANDIDATE_COUNT);
-  const endCandidates = findNearestNodes(graph, destCoord, SNAP_CANDIDATE_COUNT);
+  const startCandidates = findNearestNodes(graph, originCoord);
+  const endCandidates = findNearestNodes(graph, destCoord);
 
   let bestRoute = null;
   let bestTotal = Infinity;
@@ -686,7 +683,7 @@ function calculateAndDrawRoute() {
   console.log(`[Route debug] Straight-line distance: ${Math.round(straightLineMeters)}m`);
   console.log(`[Route debug] Chosen total route distance: ${Math.round(totalMeters)}m (start snap: ${Math.round(bestStartSnap)}m, end snap: ${Math.round(bestEndSnap)}m)`);
   console.log(`[Route debug] Ratio (route/straight-line): ${(totalMeters / straightLineMeters).toFixed(2)}`);
-  console.log(`[Route debug] Considered ${startCandidates.length * endCandidates.length} start/end combinations`);
+  console.log(`[Route debug] Considered ${startCandidates.length} start candidates × ${endCandidates.length} end candidates`);
   console.log('[Route debug] Full route coordinates (paste into geojson.io to visualize):');
   console.log(JSON.stringify({
     type: 'Feature',
