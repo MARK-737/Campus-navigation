@@ -26,15 +26,6 @@ const NAV_ZOOM = 19;
 const SNAP_RADIUS_METERS = 40;
 const SNAP_MAX_CANDIDATES = 10;
 
-// NEW: the maximum "last-mile" connector length we're willing to draw
-// as a straight line from the real network to the user/destination.
-// Below this, it's a believable short walk to a door/curb. Above this,
-// drawing a straight line would cut across open ground or buildings —
-// so instead we just stop the route at the real network, same as
-// before this fix. Adjust this single number if your campus's real
-// building-to-path gaps are typically larger or smaller.
-const MAX_STUB_METERS = 30;
-
 let buildingList = [];
 
 let userMarker = null;
@@ -115,7 +106,6 @@ map.on('load', () => {
     }
   });
 
-  // Main on-network route — solid line, unchanged styling.
   map.addSource('route-line-source', {
     type: 'geojson',
     data: { type: 'FeatureCollection', features: [] }
@@ -129,27 +119,6 @@ map.on('load', () => {
       'line-color': '#1565c0',
       'line-width': 6,
       'line-opacity': 0.95
-    }
-  });
-
-  // NEW: separate layer just for the short "last-mile" connector
-  // segments (origin-to-network, network-to-destination). Dashed, so
-  // it reads visually as "the last short stretch," distinct from the
-  // solid on-road route.
-  map.addSource('route-stub-source', {
-    type: 'geojson',
-    data: { type: 'FeatureCollection', features: [] }
-  });
-
-  map.addLayer({
-    id: 'route-stub-line',
-    type: 'line',
-    source: 'route-stub-source',
-    paint: {
-      'line-color': '#1565c0',
-      'line-width': 5,
-      'line-opacity': 0.85,
-      'line-dasharray': [2, 2]
     }
   });
 
@@ -633,7 +602,6 @@ function updateStatus(message) {
 
 function clearRoute() {
   map.getSource('route-line-source').setData({ type: 'FeatureCollection', features: [] });
-  map.getSource('route-stub-source').setData({ type: 'FeatureCollection', features: [] });
 }
 
 
@@ -655,38 +623,12 @@ function findNearestNodes(graph, coord) {
   return allCandidates.slice(0, SNAP_MAX_CANDIDATES);
 }
 
-// NEW: builds the dashed "last-mile" connector features for whichever
-// end(s) have a short enough gap to be believable — skips drawing a
-// stub entirely (leaving the route to just end at the real network)
-// when the gap is too large to represent a genuine short walk to a
-// door or curb.
-function buildStubFeatures(startSnapDist, startNode, endSnapDist, endNode) {
-  const features = [];
-
-  if (startSnapDist <= MAX_STUB_METERS && startSnapDist > 0) {
-    features.push({
-      type: 'Feature',
-      geometry: { type: 'LineString', coordinates: [originCoord, startNode] },
-      properties: {}
-    });
-  }
-
-  if (endSnapDist <= MAX_STUB_METERS && endSnapDist > 0) {
-    features.push({
-      type: 'Feature',
-      geometry: { type: 'LineString', coordinates: [endNode, destCoord] },
-      properties: {}
-    });
-  }
-
-  return features;
-}
-
-function calculateAndDrawRoute() {
-  const graph = currentMode === 'walk' ? walkGraph : driveGraph;
-
-  const startCandidates = findNearestNodes(graph, originCoord);
-  const endCandidates = findNearestNodes(graph, destCoord);
+// Finds the best route WITHIN one graph between two real-world points,
+// trying multiple nearby candidate nodes on both ends (same logic as
+// before) — returns the path plus the snap distances at each end.
+function findBestRouteInGraph(graph, fromCoord, toCoord) {
+  const startCandidates = findNearestNodes(graph, fromCoord);
+  const endCandidates = findNearestNodes(graph, toCoord);
 
   let bestRoute = null;
   let bestTotal = Infinity;
@@ -710,47 +652,85 @@ function calculateAndDrawRoute() {
     });
   });
 
-  if (!bestRoute) {
-    updateStatus('No route found for this mode. Try a different destination or mode.');
-    return;
+  return { route: bestRoute, total: bestTotal, startSnap: bestStartSnap, endSnap: bestEndSnap };
+}
+
+// NEW: this is the core of the fix. For DRIVING mode specifically, once
+// the road-based route reaches as far as roads go, this continues the
+// line on foot — using the footpath network (walkGraph) — all the way
+// to the real origin/destination point, instead of stopping short or
+// drawing a straight line across open ground. Falls back to a short
+// straight segment ONLY in the rare case no footpath connection can be
+// found at all (shouldn't happen, since the walk graph is fully
+// connected campus-wide, per the island checks above).
+function extendToRealPointViaFootpaths(networkNode, realCoord) {
+  const result = findBestRouteInGraph(walkGraph, networkNode, realCoord);
+  if (result.route && result.route.length > 0) {
+    return [networkNode, ...result.route, realCoord];
+  }
+  return [networkNode, realCoord]; // rare fallback
+}
+
+function calculateAndDrawRoute() {
+  let fullRoute = [];
+
+  if (currentMode === 'walk') {
+    // Walking mode: footpaths already reach close to nearly everything,
+    // so a single search across walkGraph, with the real origin/dest
+    // simply appended, is sufficient and accurate.
+    const result = findBestRouteInGraph(walkGraph, originCoord, destCoord);
+
+    if (!result.route) {
+      updateStatus('No route found for this mode. Try a different destination or mode.');
+      return;
+    }
+
+    fullRoute = [originCoord, ...result.route, destCoord];
+
+  } else {
+    // Driving mode: route on ROADS as far as they actually go, then
+    // CONTINUE on footpaths for any remaining stretch at either end —
+    // this is what keeps the line on real paths all the way to the
+    // destination, instead of stopping where the road network ends.
+    const result = findBestRouteInGraph(driveGraph, originCoord, destCoord);
+
+    if (!result.route) {
+      updateStatus('No route found for this mode. Try a different destination or mode.');
+      return;
+    }
+
+    const driveStartNode = result.route[0];
+    const driveEndNode = result.route[result.route.length - 1];
+
+    const startApproach = extendToRealPointViaFootpaths(driveStartNode, originCoord);
+    const endApproach = extendToRealPointViaFootpaths(driveEndNode, destCoord);
+
+    // startApproach: [originCoord, ...footpath..., driveStartNode] — reversed
+    // so it leads INTO the drive route in the right order.
+    const startApproachReversed = [...startApproach].reverse();
+
+    // Stitch: origin→(footpath)→driveStart→(road)→driveEnd→(footpath)→destination
+    // Slicing off duplicate boundary points where segments meet.
+    fullRoute = [
+      ...startApproachReversed.slice(0, -1),
+      ...result.route,
+      ...endApproach.slice(1)
+    ];
   }
 
-  // CHANGED: the SOLID route now stays strictly on the real network —
-  // no straight-line stitching onto it. The short connector gaps (if
-  // small enough) are drawn SEPARATELY as a dashed stub, via
-  // buildStubFeatures below.
-  const route = bestRoute;
+  drawRoute(fullRoute);
 
-  drawRoute(route);
-
-  const stubFeatures = buildStubFeatures(
-    bestStartSnap, bestRoute[0],
-    bestEndSnap, bestRoute[bestRoute.length - 1]
-  );
-  map.getSource('route-stub-source').setData({
-    type: 'FeatureCollection',
-    features: stubFeatures
-  });
-
-  // currentRoute (used for live progress tracking, turn detection, and
-  // the receding line during navigation) includes the stub ends ONLY
-  // where they were actually short enough to draw — keeping the
-  // "distance traveled" calculations consistent with what's visually
-  // shown on the map.
-  let fullRoute = [...route];
-  if (bestEndSnap <= MAX_STUB_METERS && bestEndSnap > 0) fullRoute = [...fullRoute, destCoord];
-  if (bestStartSnap <= MAX_STUB_METERS && bestStartSnap > 0) fullRoute = [originCoord, ...fullRoute];
   currentRoute = fullRoute;
   turnPoints = computeTurnPoints(fullRoute);
 
   const totalMeters = calculateTotalDistance(fullRoute);
-
   const straightLineMeters = turf.distance(originCoord, destCoord, { units: 'meters' });
+
   console.log(`[Route debug] Mode: ${currentMode}`);
   console.log(`[Route debug] Straight-line distance: ${Math.round(straightLineMeters)}m`);
-  console.log(`[Route debug] Chosen total route distance: ${Math.round(totalMeters)}m (start snap: ${Math.round(bestStartSnap)}m${bestStartSnap > MAX_STUB_METERS ? ' — TOO FAR, stub not drawn' : ''}, end snap: ${Math.round(bestEndSnap)}m${bestEndSnap > MAX_STUB_METERS ? ' — TOO FAR, stub not drawn' : ''})`);
+  console.log(`[Route debug] Full stitched route distance: ${Math.round(totalMeters)}m`);
   console.log(`[Route debug] Ratio (route/straight-line): ${(totalMeters / straightLineMeters).toFixed(2)}`);
-  console.log(`[Route debug] Considered ${startCandidates.length} start candidates × ${endCandidates.length} end candidates`);
+  console.log(`[Route debug] Route point count: ${fullRoute.length}`);
 
   const speed = currentMode === 'walk' ? WALK_SPEED_MPS : DRIVE_SPEED_MPS;
   const minutes = Math.max(1, Math.round(totalMeters / speed / 60));
