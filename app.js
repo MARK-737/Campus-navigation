@@ -15,13 +15,12 @@ let driveGraph = {};
 
 let currentMode = 'walk';
 let originCoord = null;
-let destCoord = null;      // the selected building's CENTROID — used for highlighting/display only now
+let destCoord = null;
 let destName = null;
-let destBuildingId = null; // NEW: OBJECTID of the selected building, used to look up its access points
 
-// NEW: the exact real-world point actually being navigated TO (an
-// access point when available, otherwise falls back to destCoord).
-// This is what arrival detection checks against.
+// The real network point the route currently ends at — always a
+// genuine graph node, never the raw building centroid — used for both
+// the drawn line's endpoint and arrival detection.
 let arrivalTarget = null;
 
 const WALK_SPEED_MPS = 1.4;
@@ -33,9 +32,6 @@ const SNAP_RADIUS_METERS = 40;
 const SNAP_MAX_CANDIDATES = 10;
 
 let buildingList = [];
-
-// NEW: building_id -> array of [lng, lat] access point coordinates
-let accessPointsByBuilding = {};
 
 let userMarker = null;
 let watchId = null;
@@ -54,8 +50,7 @@ const FOLLOW_RESUME_DELAY_MS = 4000;
 
 let dataReady = {
   buildings: false,
-  network: false,
-  accessPoints: false
+  network: false
 };
 
 
@@ -177,15 +172,10 @@ map.on('load', () => {
         }
       });
 
-      // CHANGED: clicking a building now also captures its OBJECTID
-      // (destBuildingId), so we can look up its access points too —
-      // not just its centroid.
       map.on('click', 'buildings-3d', (e) => {
         if (!dataReady.buildings || !dataReady.network) return;
-        const props = e.features[0].properties;
         destCoord = turf.centroid(e.features[0]).geometry.coordinates;
-        destName = normalizeName(props.Name) || null;
-        destBuildingId = props.OBJECTID;
+        destName = normalizeName(e.features[0].properties.Name) || null;
         document.getElementById('dest-input').value = destName || 'Selected on map';
         document.getElementById('suggestions').innerHTML = '';
         if (destName) highlightDestination(destName);
@@ -203,34 +193,6 @@ map.on('load', () => {
     .catch(err => {
       console.error('Failed to load Buildings.geojson:', err);
       showLoadError('Could not load building data. Please refresh, or check your connection.');
-    });
-
-  // NEW: fetch AccessPoints.geojson, and build the building_id -> [coords]
-  // lookup used to find real entrance points for each destination.
-  fetch('data/data/data/AccessPoints.geojson')
-    .then(res => {
-      if (!res.ok) throw new Error(`Server responded with ${res.status}`);
-      return res.json();
-    })
-    .then(data => {
-      data.features.forEach(feature => {
-        const bId = feature.properties.building_id;
-        if (bId === undefined || bId === null) return;
-        if (!accessPointsByBuilding[bId]) accessPointsByBuilding[bId] = [];
-        accessPointsByBuilding[bId].push(feature.geometry.coordinates);
-      });
-
-      console.log('[Access points] Buildings with at least one access point:', Object.keys(accessPointsByBuilding).length);
-
-      dataReady.accessPoints = true;
-      checkAllDataReady();
-    })
-    .catch(err => {
-      console.error('Failed to load AccessPoints.geojson:', err);
-      // Non-fatal: the app still works via centroid fallback, so we
-      // don't block the loading screen on this one failing.
-      dataReady.accessPoints = true;
-      checkAllDataReady();
     });
 
   fetch('data/data/data/CampusNetwork.geojson')
@@ -277,7 +239,7 @@ window.addEventListener('resize', () => {
 
 
 function checkAllDataReady() {
-  if (dataReady.buildings && dataReady.network && dataReady.accessPoints) {
+  if (dataReady.buildings && dataReady.network) {
     document.getElementById('loading-overlay').classList.add('hidden');
     document.getElementById('dest-input').disabled = false;
     document.getElementById('search-btn').disabled = false;
@@ -478,8 +440,6 @@ function computeTurnPoints(routeCoords, angleThreshold = 45, minSegmentMeters = 
 }
 
 function checkNavigationProgress(liveCoord) {
-  // CHANGED: arrival is now checked against arrivalTarget (the real
-  // access point being used), not the building's centroid.
   if (!arrivalTarget) return;
 
   const distToDest = turf.distance(liveCoord, arrivalTarget, { units: 'meters' });
@@ -505,9 +465,6 @@ function checkNavigationProgress(liveCoord) {
 }
 
 
-// CHANGED: now also captures each building's OBJECTID (as 'id'), so
-// selecting a destination from the search list can look up its access
-// points, not just its name/centroid.
 function extractNamedLocations(geojson) {
   const results = [];
 
@@ -518,7 +475,7 @@ function extractNamedLocations(geojson) {
     const centroid = turf.centroid(feature);
     const coord = centroid.geometry.coordinates;
 
-    results.push({ name, coord, id: feature.properties.OBJECTID });
+    results.push({ name, coord });
   });
 
   return results;
@@ -534,7 +491,6 @@ destInput.addEventListener('input', () => {
   if (query.length === 0) {
     destCoord = null;
     destName = null;
-    destBuildingId = null;
     clearHighlight();
     return;
   }
@@ -549,7 +505,6 @@ destInput.addEventListener('input', () => {
       destInput.value = match.name;
       destCoord = match.coord;
       destName = match.name;
-      destBuildingId = match.id; // CHANGED: capture the OBJECTID for access-point lookup
       suggestionsBox.innerHTML = '';
       highlightDestination(match.name);
     });
@@ -639,7 +594,6 @@ document.getElementById('search-again-btn').addEventListener('click', () => {
   destInput.value = '';
   destCoord = null;
   destName = null;
-  destBuildingId = null;
   clearHighlight();
   clearRoute();
   updateStatus('Search for a destination to begin.');
@@ -675,47 +629,40 @@ function findNearestNodes(graph, coord) {
   return allCandidates.slice(0, SNAP_MAX_CANDIDATES);
 }
 
-// CHANGED: this is the core of the upgrade. Instead of always routing
-// to the destination's centroid, we now try routing to EACH real
-// access point belonging to the selected building (if any exist), on
-// top of trying multiple nearby graph nodes as before — and keep
-// whichever combination produces the smallest genuine total trip.
-// If the building has no access points on record, we fall back to the
-// old centroid-based behavior automatically.
+// CHANGED — this is the critical fix: currentRoute is now set to
+// EXACTLY what findShortestPath returns (bestRoute), with nothing
+// manually added before or after it. Every single coordinate in the
+// drawn/navigated line is therefore guaranteed to be a real point on
+// your digitized Foot_path/Roads network — it can never veer onto
+// open ground. arrivalTarget is the route's own last coordinate (a
+// genuine network point), not the building's centroid, so "You have
+// arrived" triggers based on reaching real, walkable ground closest
+// to the destination — not an unreachable point inside a building.
 function calculateAndDrawRoute() {
   const graph = currentMode === 'walk' ? walkGraph : driveGraph;
 
-  const destPoints = (destBuildingId !== null && accessPointsByBuilding[destBuildingId] && accessPointsByBuilding[destBuildingId].length > 0)
-    ? accessPointsByBuilding[destBuildingId]
-    : [destCoord];
-
   const startCandidates = findNearestNodes(graph, originCoord);
+  const endCandidates = findNearestNodes(graph, destCoord);
 
   let bestRoute = null;
   let bestTotal = Infinity;
   let bestStartSnap = 0;
   let bestEndSnap = 0;
-  let bestDestPoint = null;
 
-  destPoints.forEach(destPoint => {
-    const endCandidates = findNearestNodes(graph, destPoint);
+  startCandidates.forEach(startC => {
+    endCandidates.forEach(endC => {
+      const candidateRoute = findShortestPath(graph, startC.node, endC.node);
+      if (!candidateRoute) return;
 
-    startCandidates.forEach(startC => {
-      endCandidates.forEach(endC => {
-        const candidateRoute = findShortestPath(graph, startC.node, endC.node);
-        if (!candidateRoute) return;
+      const graphDist = calculateTotalDistance(candidateRoute);
+      const total = startC.dist + graphDist + endC.dist;
 
-        const graphDist = calculateTotalDistance(candidateRoute);
-        const total = startC.dist + graphDist + endC.dist;
-
-        if (total < bestTotal) {
-          bestTotal = total;
-          bestRoute = candidateRoute;
-          bestStartSnap = startC.dist;
-          bestEndSnap = endC.dist;
-          bestDestPoint = destPoint;
-        }
-      });
+      if (total < bestTotal) {
+        bestTotal = total;
+        bestRoute = candidateRoute;
+        bestStartSnap = startC.dist;
+        bestEndSnap = endC.dist;
+      }
     });
   });
 
@@ -724,28 +671,21 @@ function calculateAndDrawRoute() {
     return;
   }
 
-  // NEW: extend the drawn/navigated route so it genuinely touches the
-  // real origin and the real destination point — previously the line
-  // only spanned graph-node to graph-node, silently stopping short at
-  // both ends. This directly fixes "the blue line doesn't reach the
-  // destination."
-  const route = [originCoord, ...bestRoute, bestDestPoint];
+  drawRoute(bestRoute);
 
-  arrivalTarget = bestDestPoint;
+  currentRoute = bestRoute;
+  arrivalTarget = bestRoute[bestRoute.length - 1];
+  turnPoints = computeTurnPoints(bestRoute);
 
-  drawRoute(route);
+  const totalMeters = bestTotal;
 
-  currentRoute = route;
-  turnPoints = computeTurnPoints(route);
-
-  const totalMeters = calculateTotalDistance(route);
-
-  const straightLineMeters = turf.distance(originCoord, bestDestPoint, { units: 'meters' });
+  const straightLineMeters = turf.distance(originCoord, destCoord, { units: 'meters' });
   console.log(`[Route debug] Mode: ${currentMode}`);
-  console.log(`[Route debug] Destination points considered: ${destPoints.length}`);
-  console.log(`[Route debug] Straight-line distance to chosen access point: ${Math.round(straightLineMeters)}m`);
-  console.log(`[Route debug] Chosen total route distance: ${Math.round(totalMeters)}m (start snap: ${Math.round(bestStartSnap)}m, end snap: ${Math.round(bestEndSnap)}m)`);
-  console.log(`[Route debug] Ratio (route/straight-line): ${(totalMeters / straightLineMeters).toFixed(2)}`);
+  console.log(`[Route debug] Straight-line distance to destination centroid: ${Math.round(straightLineMeters)}m`);
+  console.log(`[Route debug] On-network route distance: ${Math.round(calculateTotalDistance(bestRoute))}m`);
+  console.log(`[Route debug] Distance from your position to network: ${Math.round(bestStartSnap)}m`);
+  console.log(`[Route debug] Distance from network to destination centroid: ${Math.round(bestEndSnap)}m`);
+  console.log(`[Route debug] Total (start snap + network + end snap): ${Math.round(totalMeters)}m`);
 
   const speed = currentMode === 'walk' ? WALK_SPEED_MPS : DRIVE_SPEED_MPS;
   const minutes = Math.max(1, Math.round(totalMeters / speed / 60));
