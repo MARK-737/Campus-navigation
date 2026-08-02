@@ -15,7 +15,8 @@ let driveGraph = {};
 
 let currentMode = 'walk';
 let originCoord = null;
-let destCoord = null;
+let destCoord = null;      // the actual ROUTING target — a buffered edge point, not the centroid
+let destCentroid = null;   // NEW: the raw building centroid, kept separately for highlighting/labeling only
 let destName = null;
 
 const WALK_SPEED_MPS = 1.4;
@@ -25,6 +26,11 @@ const NAV_ZOOM = 19;
 
 const SNAP_RADIUS_METERS = 40;
 const SNAP_MAX_CANDIDATES = 10;
+
+// NEW: how far outside a building's real footprint we place the
+// routing target — this keeps the route ending at the building's
+// edge (like a door/entrance area) instead of its unreachable center.
+const BUILDING_BUFFER_METERS = 6;
 
 let buildingList = [];
 
@@ -52,6 +58,42 @@ let dataReady = {
 function normalizeName(name) {
   if (!name) return name;
   return name.trim().replace(/\s+/g, ' ');
+}
+
+// NEW: given a building's polygon and a reference point (typically the
+// user's origin, or the campus center as a fallback), this buffers the
+// polygon outward by a few meters and returns whichever point on that
+// buffer's outline is closest to the reference — effectively "the
+// nearest accessible edge point of this building." This is what
+// replaces routing directly to the unreachable center.
+function getBuildingEdgeTarget(polygonGeometry, referenceCoord) {
+  try {
+    const feature = { type: 'Feature', geometry: polygonGeometry, properties: {} };
+    const buffered = turf.buffer(feature, BUILDING_BUFFER_METERS, { units: 'meters' });
+
+    let ring;
+    if (buffered.geometry.type === 'Polygon') {
+      ring = buffered.geometry.coordinates[0];
+    } else {
+      // MultiPolygon: just use the first ring of the first polygon part
+      ring = buffered.geometry.coordinates[0][0];
+    }
+
+    let nearest = ring[0];
+    let minDist = Infinity;
+    ring.forEach(pt => {
+      const d = turf.distance(referenceCoord, pt, { units: 'meters' });
+      if (d < minDist) {
+        minDist = d;
+        nearest = pt;
+      }
+    });
+
+    return nearest;
+  } catch (err) {
+    console.error('Buffer calculation failed, falling back to centroid:', err);
+    return null;
+  }
 }
 
 
@@ -167,10 +209,21 @@ map.on('load', () => {
         }
       });
 
+      // CHANGED: clicking a building now computes the buffered edge
+      // point (using current origin as the reference, if available)
+      // as the actual routing destCoord — destCentroid keeps the raw
+      // center for highlighting purposes only.
       map.on('click', 'buildings-3d', (e) => {
         if (!dataReady.buildings || !dataReady.network) return;
-        destCoord = [e.lngLat.lng, e.lngLat.lat];
-        destName = normalizeName(e.features[0].properties.Name) || null;
+        const feature = e.features[0];
+        const centroid = turf.centroid(feature).geometry.coordinates;
+        destCentroid = centroid;
+        destName = normalizeName(feature.properties.Name) || null;
+
+        const reference = originCoord || centroid;
+        const edgeTarget = getBuildingEdgeTarget(feature.geometry, reference);
+        destCoord = edgeTarget || centroid;
+
         document.getElementById('dest-input').value = destName || 'Selected on map';
         document.getElementById('suggestions').innerHTML = '';
         if (destName) highlightDestination(destName);
@@ -341,6 +394,9 @@ function updateRouteLineProgress(liveCoord) {
     features: [{ type: 'Feature', geometry: remaining.geometry, properties: {} }]
   });
 
+  // NOTE: arrival detection uses distance to destCentroid (the actual
+  // building), not destCoord (the edge target), so "you have arrived"
+  // still triggers based on real proximity to the building itself.
   const remainingMeters = calculateTotalDistance(remaining.geometry.coordinates);
   const speed = currentMode === 'walk' ? WALK_SPEED_MPS : DRIVE_SPEED_MPS;
   const remainingMinutes = Math.max(1, Math.round(remainingMeters / speed / 60));
@@ -435,9 +491,12 @@ function computeTurnPoints(routeCoords, angleThreshold = 45, minSegmentMeters = 
 }
 
 function checkNavigationProgress(liveCoord) {
-  if (!destCoord) return;
+  if (!destCentroid) return;
 
-  const distToDest = turf.distance(liveCoord, destCoord, { units: 'meters' });
+  // CHANGED: arrival is measured against the real building centroid,
+  // not the edge routing target — this keeps "you have arrived" tied
+  // to actual proximity to the building, unaffected by the buffer fix.
+  const distToDest = turf.distance(liveCoord, destCentroid, { units: 'meters' });
   if (distToDest < 15) {
     speak('You have arrived at your destination.');
     navigationActive = false;
@@ -460,6 +519,8 @@ function checkNavigationProgress(liveCoord) {
 }
 
 
+// CHANGED: now also stores each building's full polygon geometry, not
+// just its centroid — needed to compute the edge/buffer target.
 function extractNamedLocations(geojson) {
   const results = [];
 
@@ -470,7 +531,7 @@ function extractNamedLocations(geojson) {
     const centroid = turf.centroid(feature);
     const coord = centroid.geometry.coordinates;
 
-    results.push({ name, coord });
+    results.push({ name, coord, geometry: feature.geometry });
   });
 
   return results;
@@ -485,6 +546,7 @@ destInput.addEventListener('input', () => {
 
   if (query.length === 0) {
     destCoord = null;
+    destCentroid = null;
     destName = null;
     clearHighlight();
     return;
@@ -498,8 +560,16 @@ destInput.addEventListener('input', () => {
     item.textContent = match.name;
     item.addEventListener('click', () => {
       destInput.value = match.name;
-      destCoord = match.coord;
       destName = match.name;
+      destCentroid = match.coord;
+
+      // CHANGED: destCoord is now the buffered edge point, computed
+      // relative to the user's current origin — same fix as the
+      // map-click handler above.
+      const reference = originCoord || match.coord;
+      const edgeTarget = getBuildingEdgeTarget(match.geometry, reference);
+      destCoord = edgeTarget || match.coord;
+
       suggestionsBox.innerHTML = '';
       highlightDestination(match.name);
     });
@@ -587,6 +657,7 @@ document.getElementById('search-again-btn').addEventListener('click', () => {
 
   destInput.value = '';
   destCoord = null;
+  destCentroid = null;
   destName = null;
   clearHighlight();
   clearRoute();
@@ -623,9 +694,6 @@ function findNearestNodes(graph, coord) {
   return allCandidates.slice(0, SNAP_MAX_CANDIDATES);
 }
 
-// Finds the best route WITHIN one graph between two real-world points,
-// trying multiple nearby candidate nodes on both ends (same logic as
-// before) — returns the path plus the snap distances at each end.
 function findBestRouteInGraph(graph, fromCoord, toCoord) {
   const startCandidates = findNearestNodes(graph, fromCoord);
   const endCandidates = findNearestNodes(graph, toCoord);
@@ -655,29 +723,18 @@ function findBestRouteInGraph(graph, fromCoord, toCoord) {
   return { route: bestRoute, total: bestTotal, startSnap: bestStartSnap, endSnap: bestEndSnap };
 }
 
-// NEW: this is the core of the fix. For DRIVING mode specifically, once
-// the road-based route reaches as far as roads go, this continues the
-// line on foot — using the footpath network (walkGraph) — all the way
-// to the real origin/destination point, instead of stopping short or
-// drawing a straight line across open ground. Falls back to a short
-// straight segment ONLY in the rare case no footpath connection can be
-// found at all (shouldn't happen, since the walk graph is fully
-// connected campus-wide, per the island checks above).
 function extendToRealPointViaFootpaths(networkNode, realCoord) {
   const result = findBestRouteInGraph(walkGraph, networkNode, realCoord);
   if (result.route && result.route.length > 0) {
     return [networkNode, ...result.route, realCoord];
   }
-  return [networkNode, realCoord]; // rare fallback
+  return [networkNode, realCoord];
 }
 
 function calculateAndDrawRoute() {
   let fullRoute = [];
 
   if (currentMode === 'walk') {
-    // Walking mode: footpaths already reach close to nearly everything,
-    // so a single search across walkGraph, with the real origin/dest
-    // simply appended, is sufficient and accurate.
     const result = findBestRouteInGraph(walkGraph, originCoord, destCoord);
 
     if (!result.route) {
@@ -688,10 +745,6 @@ function calculateAndDrawRoute() {
     fullRoute = [originCoord, ...result.route, destCoord];
 
   } else {
-    // Driving mode: route on ROADS as far as they actually go, then
-    // CONTINUE on footpaths for any remaining stretch at either end —
-    // this is what keeps the line on real paths all the way to the
-    // destination, instead of stopping where the road network ends.
     const result = findBestRouteInGraph(driveGraph, originCoord, destCoord);
 
     if (!result.route) {
@@ -705,12 +758,8 @@ function calculateAndDrawRoute() {
     const startApproach = extendToRealPointViaFootpaths(driveStartNode, originCoord);
     const endApproach = extendToRealPointViaFootpaths(driveEndNode, destCoord);
 
-    // startApproach: [originCoord, ...footpath..., driveStartNode] — reversed
-    // so it leads INTO the drive route in the right order.
     const startApproachReversed = [...startApproach].reverse();
 
-    // Stitch: origin→(footpath)→driveStart→(road)→driveEnd→(footpath)→destination
-    // Slicing off duplicate boundary points where segments meet.
     fullRoute = [
       ...startApproachReversed.slice(0, -1),
       ...result.route,
@@ -731,6 +780,7 @@ function calculateAndDrawRoute() {
   console.log(`[Route debug] Full stitched route distance: ${Math.round(totalMeters)}m`);
   console.log(`[Route debug] Ratio (route/straight-line): ${(totalMeters / straightLineMeters).toFixed(2)}`);
   console.log(`[Route debug] Route point count: ${fullRoute.length}`);
+  console.log(`[Route debug] Destination edge target used (not centroid):`, destCoord);
 
   const speed = currentMode === 'walk' ? WALK_SPEED_MPS : DRIVE_SPEED_MPS;
   const minutes = Math.max(1, Math.round(totalMeters / speed / 60));
