@@ -15,7 +15,7 @@ let driveGraph = {};
 
 let currentMode = 'walk';
 let originCoord = null;
-let destCoord = null; // plain building centroid — same as before, no buffer/edge logic
+let destCoord = null;
 let destName = null;
 
 const WALK_SPEED_MPS = 1.4;
@@ -167,12 +167,10 @@ map.on('load', () => {
         }
       });
 
-      // REVERTED: back to plain centroid, no buffer/edge calculation.
       map.on('click', 'buildings-3d', (e) => {
         if (!dataReady.buildings || !dataReady.network) return;
-        const feature = e.features[0];
-        destCoord = turf.centroid(feature).geometry.coordinates;
-        destName = normalizeName(feature.properties.Name) || null;
+        destCoord = [e.lngLat.lng, e.lngLat.lat];
+        destName = normalizeName(e.features[0].properties.Name) || null;
         document.getElementById('dest-input').value = destName || 'Selected on map';
         document.getElementById('suggestions').innerHTML = '';
         if (destName) highlightDestination(destName);
@@ -625,14 +623,6 @@ function findNearestNodes(graph, coord) {
   return allCandidates.slice(0, SNAP_MAX_CANDIDATES);
 }
 
-// CHANGED: this is now the ONLY route-building function used. It finds
-// the best real path within the single relevant graph (walkGraph or
-// driveGraph, depending on mode) between the nearest usable candidate
-// nodes to the origin and destination — and returns that graph path
-// EXACTLY as found. Nothing is appended to either end. Nothing is
-// switched between graphs mid-route. If the nearest usable node is far
-// from the real origin/destination, the drawn line simply starts/ends
-// there — it does not invent any further line to bridge that gap.
 function calculateAndDrawRoute() {
   const graph = currentMode === 'walk' ? walkGraph : driveGraph;
 
@@ -640,7 +630,7 @@ function calculateAndDrawRoute() {
   const endCandidates = findNearestNodes(graph, destCoord);
 
   let bestRoute = null;
-  let bestGraphDist = Infinity;
+  let bestTotal = Infinity;
   let bestStartSnap = 0;
   let bestEndSnap = 0;
 
@@ -650,19 +640,13 @@ function calculateAndDrawRoute() {
       if (!candidateRoute) return;
 
       const graphDist = calculateTotalDistance(candidateRoute);
-      // Selection still weighs total realistic trip length (snap +
-      // graph distance), so a genuinely shorter real route continues
-      // to win over a merely-closer starting point — same principle
-      // as before, just without altering what gets DRAWN.
       const total = startC.dist + graphDist + endC.dist;
 
-      if (total < bestGraphDist + bestStartSnap + bestEndSnap || bestRoute === null) {
-        if (total < (bestRoute ? (bestGraphDist + bestStartSnap + bestEndSnap) : Infinity)) {
-          bestGraphDist = graphDist;
-          bestRoute = candidateRoute;
-          bestStartSnap = startC.dist;
-          bestEndSnap = endC.dist;
-        }
+      if (total < bestTotal) {
+        bestTotal = total;
+        bestRoute = candidateRoute;
+        bestStartSnap = startC.dist;
+        bestEndSnap = endC.dist;
       }
     });
   });
@@ -672,8 +656,6 @@ function calculateAndDrawRoute() {
     return;
   }
 
-  // The drawn/tracked route is EXACTLY the graph path — no stitching,
-  // no synthetic endpoints, no switching to another graph.
   const route = bestRoute;
 
   drawRoute(route);
@@ -681,15 +663,14 @@ function calculateAndDrawRoute() {
   currentRoute = route;
   turnPoints = computeTurnPoints(route);
 
-  const totalMeters = bestGraphDist;
-  const straightLineMeters = turf.distance(originCoord, destCoord, { units: 'meters' });
+  const totalMeters = bestTotal;
 
+  const straightLineMeters = turf.distance(originCoord, destCoord, { units: 'meters' });
   console.log(`[Route debug] Mode: ${currentMode}`);
   console.log(`[Route debug] Straight-line distance: ${Math.round(straightLineMeters)}m`);
-  console.log(`[Route debug] On-network route distance: ${Math.round(totalMeters)}m`);
-  console.log(`[Route debug] Start snap (gap between real origin and network): ${Math.round(bestStartSnap)}m`);
-  console.log(`[Route debug] End snap (gap between network and real destination): ${Math.round(bestEndSnap)}m`);
-  console.log(`[Route debug] Ratio (on-network route / straight-line): ${(totalMeters / straightLineMeters).toFixed(2)}`);
+  console.log(`[Route debug] Chosen total route distance: ${Math.round(totalMeters)}m (start snap: ${Math.round(bestStartSnap)}m, end snap: ${Math.round(bestEndSnap)}m)`);
+  console.log(`[Route debug] Ratio (route/straight-line): ${(totalMeters / straightLineMeters).toFixed(2)}`);
+  console.log(`[Route debug] Considered ${startCandidates.length} start candidates × ${endCandidates.length} end candidates`);
 
   const speed = currentMode === 'walk' ? WALK_SPEED_MPS : DRIVE_SPEED_MPS;
   const minutes = Math.max(1, Math.round(totalMeters / speed / 60));
@@ -730,6 +711,14 @@ function calculateTotalDistance(routeCoords) {
 }
 
 
+// ── NEW: NETWORK TOPOLOGY REPAIR — splits roads/paths at every real
+// physical intersection, even where the source data never placed a
+// vertex there. This is what fixes "the router won't join/leave a
+// road mid-way, only at its two digitized ends."
+
+// Pulls out every individual 2-point segment from a GeoJSON's features,
+// filtered by mode (walk/drive) — same raw extraction as before, just
+// separated out as its own step now.
 function extractSegments(geojson, modeField) {
   const segments = [];
   geojson.features.forEach(feature => {
@@ -753,6 +742,8 @@ function segmentBBox(seg) {
   };
 }
 
+// Quick cheap check to skip segment pairs that couldn't possibly cross
+// — avoids running the more expensive intersection math on every pair.
 function bboxesOverlap(a, b, pad = 0.00002) {
   return !(a.maxX + pad < b.minX || b.maxX + pad < a.minX ||
            a.maxY + pad < b.minY || b.maxY + pad < a.minY);
@@ -762,6 +753,12 @@ function pointsClose(a, b, epsilon = 1e-7) {
   return Math.abs(a[0] - b[0]) < epsilon && Math.abs(a[1] - b[1]) < epsilon;
 }
 
+// The core repair: checks every pair of segments for a genuine physical
+// crossing (using Turf's line intersection), and — wherever one is
+// found that ISN'T already a shared endpoint — records that point as a
+// place where BOTH segments need to be split. Segments are then cut
+// into smaller pieces at those points, so a real graph node ends up
+// exactly where two roads/paths actually cross on the ground.
 function splitSegmentsAtIntersections(segments) {
   const splitPoints = segments.map(() => []);
   const bboxes = segments.map(segmentBBox);
@@ -803,6 +800,8 @@ function splitSegmentsAtIntersections(segments) {
       return;
     }
 
+    // Order the split points along the segment (nearest p1 first), then
+    // chain them into consecutive smaller sub-segments.
     const ordered = extra
       .map(pt => ({ pt, d: turf.distance(p1, pt, { units: 'meters' }) }))
       .sort((a, b) => a.d - b.d);
@@ -823,6 +822,10 @@ function splitSegmentsAtIntersections(segments) {
 }
 
 
+// CHANGED: buildGraph now runs the intersection-splitting repair on the
+// raw segments FIRST, then builds the node/edge graph from the repaired,
+// properly-connected segment list — same snap()+distance logic as
+// before, just fed better-connected input.
 function buildGraph(geojson, modeField) {
   const rawSegments = extractSegments(geojson, modeField);
   const repairedSegments = splitSegmentsAtIntersections(rawSegments);
