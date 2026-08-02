@@ -5,7 +5,7 @@ const map = new mapboxgl.Map({
   container: 'map',
   style: 'mapbox://styles/mapbox/standard',
   center: [3.82550, 7.24072], // ⚠️ MANUAL INPUT NEEDED: your real campus coordinates (used only briefly, before the campus-wide view takes over)
-  zoom: 16,
+  zoom: 15,
   pitch: 60,
   bearing: -20
 });
