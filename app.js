@@ -10,17 +10,22 @@ const map = new mapboxgl.Map({
   bearing: -20
 });
 
-let walkGraph = {};
-let driveGraph = {};
+// CHANGED: one combined network graph instead of separate walk/drive
+// graphs. Each edge stores BOTH a 'drivable' and 'walkable' flag, so a
+// single route can correctly switch between the two as needed.
+let networkGraph = {};
+
+// How much more "costly" a non-preferred edge type is treated as during
+// pathfinding — high enough that the algorithm strongly prefers roads
+// while driving, but will still use footpath when it's genuinely the
+// only way through.
+const MODE_PENALTY_MULTIPLIER = 20;
 
 let currentMode = 'walk';
 let originCoord = null;
 let destCoord = null;
 let destName = null;
 
-// The real network point the route currently ends at — always a
-// genuine graph node, never the raw building centroid — used for both
-// the drawn line's endpoint and arrival detection.
 let arrivalTarget = null;
 
 const WALK_SPEED_MPS = 1.4;
@@ -39,7 +44,8 @@ let watchId = null;
 let followMode = false;
 
 let navigationActive = false;
-let currentRoute = [];
+let currentRoute = [];        // full sequence of coordinates for the current route
+let routeEdgeReal = [];       // NEW: one boolean per edge in currentRoute — true = matches current mode directly (drivable if driving), false = a walk-only fallback stretch
 let turnPoints = [];
 
 let compassActive = false;
@@ -116,14 +122,32 @@ map.on('load', () => {
     data: { type: 'FeatureCollection', features: [] }
   });
 
+  // CHANGED: TWO layers sharing one source, split by the 'drivable'
+  // property on each feature — Mapbox's line-dasharray doesn't support
+  // per-feature (data-driven) values, so two filtered layers is the
+  // correct way to show solid vs dashed portions of the same line.
   map.addLayer({
-    id: 'route-line',
+    id: 'route-line-solid',
     type: 'line',
     source: 'route-line-source',
+    filter: ['==', ['get', 'drivable'], true],
     paint: {
       'line-color': '#1565c0',
       'line-width': 6,
       'line-opacity': 0.95
+    }
+  });
+
+  map.addLayer({
+    id: 'route-line-dashed',
+    type: 'line',
+    source: 'route-line-source',
+    filter: ['==', ['get', 'drivable'], false],
+    paint: {
+      'line-color': '#f57c00',
+      'line-width': 6,
+      'line-opacity': 0.95,
+      'line-dasharray': [2, 2]
     }
   });
 
@@ -201,14 +225,11 @@ map.on('load', () => {
       return res.json();
     })
     .then(data => {
-      console.log('[Graph build] Splitting network at real intersections — this may take a moment...');
-      walkGraph = buildGraph(data, 'walk');
-      driveGraph = buildGraph(data, 'drive');
+      console.log('[Graph build] Combining network and splitting at real intersections — this may take a moment...');
+      networkGraph = buildCombinedGraph(data);
 
-      console.log('Walk graph nodes:', Object.keys(walkGraph).length);
-      console.log('Walk graph islands (should be 1):', countIslands(walkGraph));
-      console.log('Drive graph nodes:', Object.keys(driveGraph).length);
-      console.log('Drive graph islands (should be 1):', countIslands(driveGraph));
+      console.log('Network graph nodes:', Object.keys(networkGraph).length);
+      console.log('Network graph islands (should be 1):', countIslands(networkGraph));
 
       dataReady.network = true;
       checkAllDataReady();
@@ -326,29 +347,64 @@ function startLiveLocation() {
 }
 
 
+// NEW: draws the route as multiple colored/dashed segments instead of
+// one uniform line. Groups consecutive edges that share the same
+// "real" flag (matches current mode directly) into single features,
+// tagging each with properties.drivable so the two map layers (solid
+// blue / dashed orange) can filter correctly.
+function drawRouteSegmented(coordsArray, edgeRealArray) {
+  const features = [];
+  let groupCoords = [coordsArray[0]];
+  let groupReal = edgeRealArray.length > 0 ? edgeRealArray[0] : true;
+
+  for (let i = 0; i < edgeRealArray.length; i++) {
+    if (edgeRealArray[i] === groupReal) {
+      groupCoords.push(coordsArray[i + 1]);
+    } else {
+      features.push({
+        type: 'Feature',
+        geometry: { type: 'LineString', coordinates: groupCoords },
+        properties: { drivable: groupReal }
+      });
+      groupCoords = [coordsArray[i], coordsArray[i + 1]];
+      groupReal = edgeRealArray[i];
+    }
+  }
+
+  features.push({
+    type: 'Feature',
+    geometry: { type: 'LineString', coordinates: groupCoords },
+    properties: { drivable: groupReal }
+  });
+
+  map.getSource('route-line-source').setData({
+    type: 'FeatureCollection',
+    features
+  });
+}
+
+
+// CHANGED: recomputes both the visible receding line AND its color
+// segmentation on every GPS update, using the nearest-point INDEX
+// along the route (not a continuous slice) so it stays aligned with
+// the precomputed per-edge "real" flags.
 function updateRouteLineProgress(liveCoord) {
   if (currentRoute.length < 2) return;
 
   const fullLine = turf.lineString(currentRoute);
   const userPoint = turf.point(liveCoord);
   const nearest = turf.nearestPointOnLine(fullLine, userPoint);
-  const endPoint = turf.point(currentRoute[currentRoute.length - 1]);
+  const segIndex = nearest.properties.index;
 
-  let remaining;
-  try {
-    remaining = turf.lineSlice(nearest, endPoint, fullLine);
-  } catch (err) {
-    return;
-  }
+  const remainingCoords = [nearest.geometry.coordinates, ...currentRoute.slice(segIndex + 1)];
+  const remainingEdgeReal = routeEdgeReal.slice(segIndex);
 
-  map.getSource('route-line-source').setData({
-    type: 'FeatureCollection',
-    features: [{ type: 'Feature', geometry: remaining.geometry, properties: {} }]
-  });
+  if (remainingCoords.length < 2) return;
 
-  const remainingMeters = calculateTotalDistance(remaining.geometry.coordinates);
-  const speed = currentMode === 'walk' ? WALK_SPEED_MPS : DRIVE_SPEED_MPS;
-  const remainingMinutes = Math.max(1, Math.round(remainingMeters / speed / 60));
+  drawRouteSegmented(remainingCoords, remainingEdgeReal);
+
+  const remainingMeters = calculateTotalDistance(remainingCoords);
+  const remainingMinutes = calculateWeightedMinutes(remainingCoords, remainingEdgeReal, currentMode);
 
   document.getElementById('route-summary').textContent =
     `${Math.round(remainingMeters)}m • approx. ${remainingMinutes} min ${currentMode === 'walk' ? 'walk' : 'drive'}`;
@@ -582,6 +638,7 @@ document.getElementById('search-again-btn').addEventListener('click', () => {
   followMode = false;
   navigationActive = false;
   currentRoute = [];
+  routeEdgeReal = [];
   turnPoints = [];
   arrivalTarget = null;
   clearTimeout(followResumeTimer);
@@ -629,17 +686,50 @@ function findNearestNodes(graph, coord) {
   return allCandidates.slice(0, SNAP_MAX_CANDIDATES);
 }
 
-// CHANGED — this is the critical fix: currentRoute is now set to
-// EXACTLY what findShortestPath returns (bestRoute), with nothing
-// manually added before or after it. Every single coordinate in the
-// drawn/navigated line is therefore guaranteed to be a real point on
-// your digitized Foot_path/Roads network — it can never veer onto
-// open ground. arrivalTarget is the route's own last coordinate (a
-// genuine network point), not the building's centroid, so "You have
-// arrived" triggers based on reaching real, walkable ground closest
-// to the destination — not an unreachable point inside a building.
+// NEW: looks up whether the edge actually traversed between two
+// consecutive route coordinates matches the current mode directly
+// (drivable, if driving) — used to build the per-edge "real" flag
+// array that drives the two-tone rendering and mixed-speed ETA.
+function edgeMatchesMode(graph, coordA, coordB, mode) {
+  const keyA = coordA.map(n => n.toFixed(6)).join(',');
+  const neighbors = graph[keyA] || [];
+  const match = neighbors.find(n =>
+    n.node[0].toFixed(6) === coordB[0].toFixed(6) &&
+    n.node[1].toFixed(6) === coordB[1].toFixed(6)
+  );
+  if (!match) return true; // shouldn't happen, but default to "real" if somehow not found
+  return mode === 'drive' ? match.drivable : match.walkable;
+}
+
+function buildEdgeRealArray(graph, route, mode) {
+  const arr = [];
+  for (let i = 0; i < route.length - 1; i++) {
+    arr.push(edgeMatchesMode(graph, route[i], route[i + 1], mode));
+  }
+  return arr;
+}
+
+// NEW: computes travel time using the CORRECT speed for each edge —
+// driving speed where the edge is actually drivable, walking speed
+// where the route has to drop onto footpath-only ground (in drive
+// mode); always walking speed in walk mode.
+function calculateWeightedMinutes(routeCoords, edgeRealArray, mode) {
+  let totalSeconds = 0;
+  for (let i = 0; i < routeCoords.length - 1; i++) {
+    const dist = turf.distance(routeCoords[i], routeCoords[i + 1], { units: 'meters' });
+    let speed;
+    if (mode === 'drive') {
+      speed = edgeRealArray[i] ? DRIVE_SPEED_MPS : WALK_SPEED_MPS;
+    } else {
+      speed = WALK_SPEED_MPS;
+    }
+    totalSeconds += dist / speed;
+  }
+  return Math.max(1, Math.round(totalSeconds / 60));
+}
+
 function calculateAndDrawRoute() {
-  const graph = currentMode === 'walk' ? walkGraph : driveGraph;
+  const graph = networkGraph;
 
   const startCandidates = findNearestNodes(graph, originCoord);
   const endCandidates = findNearestNodes(graph, destCoord);
@@ -651,7 +741,7 @@ function calculateAndDrawRoute() {
 
   startCandidates.forEach(startC => {
     endCandidates.forEach(endC => {
-      const candidateRoute = findShortestPath(graph, startC.node, endC.node);
+      const candidateRoute = findShortestPath(graph, startC.node, endC.node, currentMode);
       if (!candidateRoute) return;
 
       const graphDist = calculateTotalDistance(candidateRoute);
@@ -671,24 +761,23 @@ function calculateAndDrawRoute() {
     return;
   }
 
-  drawRoute(bestRoute);
+  const edgeReal = buildEdgeRealArray(graph, bestRoute, currentMode);
+
+  drawRouteSegmented(bestRoute, edgeReal);
 
   currentRoute = bestRoute;
+  routeEdgeReal = edgeReal;
   arrivalTarget = bestRoute[bestRoute.length - 1];
   turnPoints = computeTurnPoints(bestRoute);
 
   const totalMeters = bestTotal;
+  const minutes = calculateWeightedMinutes(bestRoute, edgeReal, currentMode);
 
-  const straightLineMeters = turf.distance(originCoord, destCoord, { units: 'meters' });
+  const hasWalkFallback = currentMode === 'drive' && edgeReal.includes(false);
+
   console.log(`[Route debug] Mode: ${currentMode}`);
-  console.log(`[Route debug] Straight-line distance to destination centroid: ${Math.round(straightLineMeters)}m`);
-  console.log(`[Route debug] On-network route distance: ${Math.round(calculateTotalDistance(bestRoute))}m`);
-  console.log(`[Route debug] Distance from your position to network: ${Math.round(bestStartSnap)}m`);
-  console.log(`[Route debug] Distance from network to destination centroid: ${Math.round(bestEndSnap)}m`);
-  console.log(`[Route debug] Total (start snap + network + end snap): ${Math.round(totalMeters)}m`);
-
-  const speed = currentMode === 'walk' ? WALK_SPEED_MPS : DRIVE_SPEED_MPS;
-  const minutes = Math.max(1, Math.round(totalMeters / speed / 60));
+  console.log(`[Route debug] Total route distance: ${Math.round(totalMeters)}m (start snap: ${Math.round(bestStartSnap)}m, end snap: ${Math.round(bestEndSnap)}m)`);
+  console.log(`[Route debug] Includes walk-only fallback stretch: ${hasWalkFallback}`);
 
   document.getElementById('route-summary').textContent =
     `${Math.round(totalMeters)}m • approx. ${minutes} min ${currentMode === 'walk' ? 'walk' : 'drive'}`;
@@ -696,25 +785,17 @@ function calculateAndDrawRoute() {
   document.getElementById('start-nav-btn').disabled = false;
   document.getElementById('recenter-btn').disabled = false;
 
-  updateStatus('Route ready. Tap Start Navigation when you\'re ready to go.');
+  // NEW: lets the user know, in plain text too, why part of the line
+  // might be dashed/orange — not just relying on the visual alone.
+  if (hasWalkFallback) {
+    updateStatus('Route ready. Part of this trip must be walked (shown in orange).');
+  } else {
+    updateStatus('Route ready. Tap Start Navigation when you\'re ready to go.');
+  }
 }
 
 function drawRoute(routeCoords) {
-  const routeGeoJSON = {
-    type: 'FeatureCollection',
-    features: [
-      {
-        type: 'Feature',
-        geometry: {
-          type: 'LineString',
-          coordinates: routeCoords
-        },
-        properties: {}
-      }
-    ]
-  };
-
-  map.getSource('route-line-source').setData(routeGeoJSON);
+  drawRouteSegmented(routeCoords, routeCoords.map(() => true));
 }
 
 function calculateTotalDistance(routeCoords) {
@@ -726,13 +807,19 @@ function calculateTotalDistance(routeCoords) {
 }
 
 
-function extractSegments(geojson, modeField) {
+// ── NETWORK BUILDING: combined graph, intersection repair, mode-aware
+// edges (drivable + walkable flags kept together) ───────────────────
+
+function extractAllSegments(geojson) {
   const segments = [];
   geojson.features.forEach(feature => {
-    if (feature.properties[modeField] !== 1) return;
+    const walkable = feature.properties.walk === 1;
+    const drivable = feature.properties.drive === 1;
+    if (!walkable && !drivable) return;
+
     feature.geometry.coordinates.forEach(line => {
       for (let i = 0; i < line.length - 1; i++) {
-        segments.push([line[i], line[i + 1]]);
+        segments.push({ p1: line[i], p2: line[i + 1], walkable, drivable });
       }
     });
   });
@@ -740,7 +827,7 @@ function extractSegments(geojson, modeField) {
 }
 
 function segmentBBox(seg) {
-  const [p1, p2] = seg;
+  const { p1, p2 } = seg;
   return {
     minX: Math.min(p1[0], p2[0]),
     maxX: Math.max(p1[0], p2[0]),
@@ -758,6 +845,11 @@ function pointsClose(a, b, epsilon = 1e-7) {
   return Math.abs(a[0] - b[0]) < epsilon && Math.abs(a[1] - b[1]) < epsilon;
 }
 
+// CHANGED: now works on the combined segment list (roads + footpaths
+// together), so a footpath crossing a road — not just road-crossing-road
+// — gets a real shared node inserted at that crossing too. This is what
+// makes a clean transition from "drivable" to "walk-only" possible at
+// an actual physical point on the ground.
 function splitSegmentsAtIntersections(segments) {
   const splitPoints = segments.map(() => []);
   const bboxes = segments.map(segmentBBox);
@@ -766,8 +858,8 @@ function splitSegmentsAtIntersections(segments) {
     for (let j = i + 1; j < segments.length; j++) {
       if (!bboxesOverlap(bboxes[i], bboxes[j])) continue;
 
-      const [a1, a2] = segments[i];
-      const [b1, b2] = segments[j];
+      const a1 = segments[i].p1, a2 = segments[i].p2;
+      const b1 = segments[j].p1, b2 = segments[j].p2;
 
       let intersections;
       try {
@@ -791,11 +883,11 @@ function splitSegmentsAtIntersections(segments) {
 
   const finalSegments = [];
   segments.forEach((seg, idx) => {
-    const [p1, p2] = seg;
+    const { p1, p2, walkable, drivable } = seg;
     const extra = splitPoints[idx];
 
     if (extra.length === 0) {
-      finalSegments.push([p1, p2]);
+      finalSegments.push({ p1, p2, walkable, drivable });
       return;
     }
 
@@ -806,20 +898,22 @@ function splitSegmentsAtIntersections(segments) {
     let prev = p1;
     ordered.forEach(({ pt }) => {
       if (!pointsClose(prev, pt)) {
-        finalSegments.push([prev, pt]);
+        finalSegments.push({ p1: prev, p2: pt, walkable, drivable });
         prev = pt;
       }
     });
     if (!pointsClose(prev, p2)) {
-      finalSegments.push([prev, p2]);
+      finalSegments.push({ p1: prev, p2, walkable, drivable });
     }
   });
 
   return finalSegments;
 }
 
-function buildGraph(geojson, modeField) {
-  const rawSegments = extractSegments(geojson, modeField);
+// CHANGED: builds ONE graph from ALL segments together (not filtered
+// by mode), each edge carrying both its drivable and walkable flags.
+function buildCombinedGraph(geojson) {
+  const rawSegments = extractAllSegments(geojson);
   const repairedSegments = splitSegmentsAtIntersections(rawSegments);
 
   const graph = {};
@@ -828,7 +922,7 @@ function buildGraph(geojson, modeField) {
     return coord.map(n => n.toFixed(6)).join(',');
   }
 
-  repairedSegments.forEach(([p1, p2]) => {
+  repairedSegments.forEach(({ p1, p2, walkable, drivable }) => {
     const nodeA = snap(p1);
     const nodeB = snap(p2);
     const dist = turf.distance(p1, p2, { units: 'meters' });
@@ -836,8 +930,8 @@ function buildGraph(geojson, modeField) {
     if (!graph[nodeA]) graph[nodeA] = [];
     if (!graph[nodeB]) graph[nodeB] = [];
 
-    graph[nodeA].push({ node: nodeB, weight: dist });
-    graph[nodeB].push({ node: nodeA, weight: dist });
+    graph[nodeA].push({ node: p2, weight: dist, walkable, drivable });
+    graph[nodeB].push({ node: p1, weight: dist, walkable, drivable });
   });
 
   return graph;
@@ -856,7 +950,8 @@ function countIslands(graph) {
       if (visited.has(current)) continue;
       visited.add(current);
       graph[current].forEach(neighbor => {
-        if (!visited.has(neighbor.node)) stack.push(neighbor.node);
+        const neighborKey = neighbor.node.map(n => n.toFixed(6)).join(',');
+        if (!visited.has(neighborKey)) stack.push(neighborKey);
       });
     }
   });
@@ -864,7 +959,12 @@ function countIslands(graph) {
   return islands;
 }
 
-function findShortestPath(graph, startCoord, endCoord) {
+// CHANGED: takes a 'mode' parameter and applies MODE_PENALTY_MULTIPLIER
+// to edges that don't match the requested mode directly — this is what
+// lets driving routes use footpath-only stretches ONLY when genuinely
+// necessary (heavily discouraged, never forbidden), instead of hitting
+// a dead end.
+function findShortestPath(graph, startCoord, endCoord, mode) {
   const start = startCoord.map(n => n.toFixed(6)).join(',');
   const end = endCoord.map(n => n.toFixed(6)).join(',');
 
@@ -889,10 +989,14 @@ function findShortestPath(graph, startCoord, endCoord) {
     unvisited.delete(current);
 
     graph[current].forEach(neighbor => {
-      const alt = distances[current] + neighbor.weight;
-      if (alt < distances[neighbor.node]) {
-        distances[neighbor.node] = alt;
-        previous[neighbor.node] = current;
+      const neighborKey = neighbor.node.map(n => n.toFixed(6)).join(',');
+      const matchesMode = mode === 'drive' ? neighbor.drivable : neighbor.walkable;
+      const effectiveWeight = matchesMode ? neighbor.weight : neighbor.weight * MODE_PENALTY_MULTIPLIER;
+
+      const alt = distances[current] + effectiveWeight;
+      if (alt < distances[neighborKey]) {
+        distances[neighborKey] = alt;
+        previous[neighborKey] = current;
       }
     });
   }
